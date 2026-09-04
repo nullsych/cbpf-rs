@@ -1,0 +1,13 @@
+[package]
+name = "cbpf-rs"
+version = "0.0.0"
+edition = "2024"
+description = "Rust compiler from pcap-filter expressions to cBPF bytecode"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nullsych/cbpf-rs"
+readme = "README.md"
+keywords = ["bpf", "pcap", "packet", "networking", "filter"]
+categories = ["network-programming", "parser-implementations"]
+exclude = ["/.github", "/tests/corpus"]
+
+[dependencies]
