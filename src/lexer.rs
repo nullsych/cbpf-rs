@@ -1,19 +1,19 @@
 //! Tokenizer for pcap-filter expressions.
 //!
-//! Produces a flat stream of spanned [`Token`]s, e.g.:
+//! Produces a flat stream of tagged [`Token`]s, e.g.:
 //!
 //! String "tcp port 80" to tokens: [Word("tcp"), Word("port"), Word("80"), Eof].
 
-use crate::error::{CompileError, ErrorKind, Span};
+use crate::error::{CompileError, ErrorTag, Offset};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Token {
-    pub kind: TokenKind,
-    pub span: Span,
+    pub tag: TokenTag,
+    pub offset: Offset,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TokenKind {
+pub(crate) enum TokenTag {
     /// A run of word characters: keywords, decimal numbers, and address literals (`1.2.3.4`,
     /// `1.2.3.0/24`, `::1`) all come through as this - undifferentiated text for the parser to
     /// classify.
@@ -44,31 +44,31 @@ pub(crate) fn lex(src: &str) -> Result<Vec<Token>, CompileError> {
             '(' => {
                 chars.next();
                 tokens.push(Token {
-                    kind: TokenKind::LParen,
-                    span: start..start + 1,
+                    tag: TokenTag::LParen,
+                    offset: start..start + 1,
                 });
             }
             ')' => {
                 chars.next();
                 tokens.push(Token {
-                    kind: TokenKind::RParen,
-                    span: start..start + 1,
+                    tag: TokenTag::RParen,
+                    offset: start..start + 1,
                 });
             }
             // dash appears
             '-' => {
                 chars.next();
                 tokens.push(Token {
-                    kind: TokenKind::Dash,
-                    span: start..start + 1,
+                    tag: TokenTag::Dash,
+                    offset: start..start + 1,
                 });
             }
             // `not` case appears
             '!' => {
                 chars.next();
                 tokens.push(Token {
-                    kind: TokenKind::Word(String::from("not")),
-                    span: start..start + 1,
+                    tag: TokenTag::Word(String::from("not")),
+                    offset: start..start + 1,
                 });
             }
             // and / or appears
@@ -81,14 +81,14 @@ pub(crate) fn lex(src: &str) -> Result<Vec<Token>, CompileError> {
                         chars.next();
                         let word = if expected == '&' { "and" } else { "or" };
                         tokens.push(Token {
-                            kind: TokenKind::Word(String::from(word)),
-                            span: start..end,
+                            tag: TokenTag::Word(String::from(word)),
+                            offset: start..end,
                         });
                     }
                     _ => {
                         return Err(CompileError::new(
                             start..start + 1,
-                            ErrorKind::UnexpectedChar(c),
+                            ErrorTag::UnexpectedChar(c),
                         ));
                     }
                 }
@@ -108,17 +108,17 @@ pub(crate) fn lex(src: &str) -> Result<Vec<Token>, CompileError> {
                 }
                 // `start..end` always lands on char boundaries by construction, so this can't fail
                 let text = core::str::from_utf8(&bytes[start..end])
-                    .expect("span boundaries land on char boundaries by construction");
+                    .expect("offset boundaries land on char boundaries by construction");
                 tokens.push(Token {
-                    kind: TokenKind::Word(String::from(text)),
-                    span: start..end,
+                    tag: TokenTag::Word(String::from(text)),
+                    offset: start..end,
                 });
             }
             // nothing else can start a token: bail out at the first offending byte
             other => {
                 return Err(CompileError::new(
                     start..start + 1,
-                    ErrorKind::UnexpectedChar(other),
+                    ErrorTag::UnexpectedChar(other),
                 ));
             }
         }
@@ -126,8 +126,8 @@ pub(crate) fn lex(src: &str) -> Result<Vec<Token>, CompileError> {
 
     let eof_at = src.len();
     tokens.push(Token {
-        kind: TokenKind::Eof,
-        span: eof_at..eof_at,
+        tag: TokenTag::Eof,
+        offset: eof_at..eof_at,
     });
     Ok(tokens)
 }
@@ -136,8 +136,8 @@ pub(crate) fn lex(src: &str) -> Result<Vec<Token>, CompileError> {
 mod tests {
     use super::*;
 
-    fn words(src: &str) -> Vec<TokenKind> {
-        lex(src).unwrap().into_iter().map(|t| t.kind).collect()
+    fn words(src: &str) -> Vec<TokenTag> {
+        lex(src).unwrap().into_iter().map(|t| t.tag).collect()
     }
 
     #[test]
@@ -145,23 +145,23 @@ mod tests {
         assert_eq!(
             words("tcp port 80"),
             vec![
-                TokenKind::Word(String::from("tcp")),
-                TokenKind::Word(String::from("port")),
-                TokenKind::Word(String::from("80")),
-                TokenKind::Eof,
+                TokenTag::Word(String::from("tcp")),
+                TokenTag::Word(String::from("port")),
+                TokenTag::Word(String::from("80")),
+                TokenTag::Eof,
             ]
         );
     }
 
     #[test]
-    fn lex_tokenkind_separated() {
+    fn lex_token_separated() {
         let expr: &str = "tcp port 80";
 
         let tokens = lex(expr).unwrap();
 
-        assert_eq!(TokenKind::Word(String::from("tcp")), tokens[0].kind);
-        assert_eq!(TokenKind::Word(String::from("port")), tokens[1].kind);
-        assert_eq!(TokenKind::Word(String::from("80")), tokens[2].kind);
+        assert_eq!(TokenTag::Word(String::from("tcp")), tokens[0].tag);
+        assert_eq!(TokenTag::Word(String::from("port")), tokens[1].tag);
+        assert_eq!(TokenTag::Word(String::from("80")), tokens[2].tag);
     }
 
     #[test]
@@ -169,11 +169,11 @@ mod tests {
         assert_eq!(
             words("portrange 8000-8008"),
             vec![
-                TokenKind::Word(String::from("portrange")),
-                TokenKind::Word(String::from("8000")),
-                TokenKind::Dash,
-                TokenKind::Word(String::from("8008")),
-                TokenKind::Eof,
+                TokenTag::Word(String::from("portrange")),
+                TokenTag::Word(String::from("8000")),
+                TokenTag::Dash,
+                TokenTag::Word(String::from("8008")),
+                TokenTag::Eof,
             ]
         );
     }
@@ -183,7 +183,7 @@ mod tests {
     fn cidr() {
         assert_eq!(
             words("1.2.3.0/24"),
-            vec![TokenKind::Word(String::from("1.2.3.0/24")), TokenKind::Eof]
+            vec![TokenTag::Word(String::from("1.2.3.0/24")), TokenTag::Eof]
         );
     }
 
@@ -193,31 +193,31 @@ mod tests {
         assert_eq!(
             words("tcp && !udp || arp"),
             vec![
-                TokenKind::Word(String::from("tcp")),
-                TokenKind::Word(String::from("and")),
-                TokenKind::Word(String::from("not")),
-                TokenKind::Word(String::from("udp")),
-                TokenKind::Word(String::from("or")),
-                TokenKind::Word(String::from("arp")),
-                TokenKind::Eof,
+                TokenTag::Word(String::from("tcp")),
+                TokenTag::Word(String::from("and")),
+                TokenTag::Word(String::from("not")),
+                TokenTag::Word(String::from("udp")),
+                TokenTag::Word(String::from("or")),
+                TokenTag::Word(String::from("arp")),
+                TokenTag::Eof,
             ]
         );
     }
 
-    /// Test that token spans point to the correct ranges in the source text.
+    /// Test that token offsets point to the correct ranges in the source text.
     #[test]
-    fn spans_cover_the_source_text() {
+    fn offsets_cover_the_source_text() {
         let tokens = lex("  tcp  port").unwrap();
-        assert_eq!(tokens[0].span, 2..5); // "tcp"
-        assert_eq!(tokens[1].span, 7..11); // "port"
+        assert_eq!(tokens[0].offset, 2..5); // "tcp"
+        assert_eq!(tokens[1].offset, 7..11); // "port"
     }
 
     /// Test that a single `&` is rejected as an unexpected character.
     #[test]
     fn single_ampersand_is_an_error() {
         let err = lex("tcp & udp").unwrap_err();
-        assert_eq!(err.kind, ErrorKind::UnexpectedChar('&'));
-        assert_eq!(err.span, 4..5);
+        assert_eq!(err.tag, ErrorTag::UnexpectedChar('&'));
+        assert_eq!(err.offset, 4..5);
     }
 
     /// Test that parentheses are tokenized as separate tokens.
@@ -226,10 +226,10 @@ mod tests {
         assert_eq!(
             words("(tcp)"),
             vec![
-                TokenKind::LParen,
-                TokenKind::Word(String::from("tcp")),
-                TokenKind::RParen,
-                TokenKind::Eof,
+                TokenTag::LParen,
+                TokenTag::Word(String::from("tcp")),
+                TokenTag::RParen,
+                TokenTag::Eof,
             ]
         );
     }

@@ -4,7 +4,7 @@ use core::fmt;
 use core::ops::Range;
 
 /// A byte-offset range into the source string passed to [`crate::compile`].
-pub type Span = Range<usize>;
+pub type Offset = Range<usize>;
 
 /// The specific reason a compilation failed.
 ///
@@ -12,7 +12,7 @@ pub type Span = Range<usize>;
 /// variants, and that must not be a breaking change for downstream `match`es.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ErrorKind {
+pub enum ErrorTag {
     /// The lexer found a character it doesn't know how to start a token with.
     UnexpectedChar(char),
     /// The parser expected one of a specific set of tokens but found something else.
@@ -41,7 +41,7 @@ pub enum ErrorKind {
     /// it. See the project's implementation plan for why this is reported as an error rather than
     /// resolved via long-jump splitting.
     JumpDisplacementOverflow {
-        insn_index: usize,
+        inst_index: usize,
         displacement: u32,
     },
     /// `compile()` was asked for a [`crate::LinkType`] that has no support yet.
@@ -53,67 +53,67 @@ pub enum ErrorKind {
     InvalidPrimitiveCombination(&'static str),
 }
 
-impl fmt::Display for ErrorKind {
+impl fmt::Display for ErrorTag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ErrorKind::UnexpectedChar(c) => write!(f, "unexpected character '{c}'"),
+            ErrorTag::UnexpectedChar(c) => write!(f, "unexpected character '{c}'"),
 
-            ErrorKind::UnexpectedToken { expected, found } => {
+            ErrorTag::UnexpectedToken { expected, found } => {
                 write!(f, "expected {expected}, found '{found}'")
             }
 
-            ErrorKind::UnexpectedEof { expected } => {
+            ErrorTag::UnexpectedEof { expected } => {
                 write!(f, "expected {expected}, found end of input")
             }
 
-            ErrorKind::UnknownKeyword(word) => write!(f, "unknown keyword '{word}'"),
+            ErrorTag::UnknownKeyword(word) => write!(f, "unknown keyword '{word}'"),
 
-            ErrorKind::InvalidIPv4Literal(text) => {
+            ErrorTag::InvalidIPv4Literal(text) => {
                 write!(f, "'{text}' is not a valid IPv4 address or network")
             }
 
-            ErrorKind::InvalidPortNumber(text) => write!(f, "'{text}' is not a valid port number"),
+            ErrorTag::InvalidPortNumber(text) => write!(f, "'{text}' is not a valid port number"),
 
-            ErrorKind::InvalidPortRange { lo, hi } => {
+            ErrorTag::InvalidPortRange { lo, hi } => {
                 write!(
                     f,
                     "invalid port range {lo}-{hi}: lower bound exceeds upper bound"
                 )
             }
 
-            ErrorKind::UnbalancedParens => write!(f, "unbalanced parentheses"),
+            ErrorTag::UnbalancedParens => write!(f, "unbalanced parentheses"),
 
-            ErrorKind::EmptyExpression => write!(f, "empty filter expression"),
+            ErrorTag::EmptyExpression => write!(f, "empty filter expression"),
 
-            ErrorKind::JumpDisplacementOverflow {
-                insn_index,
+            ErrorTag::JumpDisplacementOverflow {
+                inst_index,
                 displacement,
             } => write!(
                 f,
-                "jump at instruction {insn_index} has displacement {displacement}, which exceeds the 8-bit cBPF jt/jf limit of 255; split the expression into a smaller one"
+                "jump at instruction {inst_index} has displacement {displacement}, which exceeds the 8-bit cBPF jt/jf limit of 255; split the expression into a smaller one"
             ),
 
-            ErrorKind::UnsupportedLinkType => {
+            ErrorTag::UnsupportedLinkType => {
                 write!(f, "this link type has no support yet")
             }
 
-            ErrorKind::Unimplemented(what) => write!(f, "{what} is not implemented yet"),
+            ErrorTag::Unimplemented(what) => write!(f, "{what} is not implemented yet"),
 
-            ErrorKind::InvalidPrimitiveCombination(msg) => write!(f, "{msg}"),
+            ErrorTag::InvalidPrimitiveCombination(msg) => write!(f, "{msg}"),
         }
     }
 }
 
-/// A compilation failure, with the source span it applies to.
+/// A compilation failure, with the source offset it applies to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileError {
-    pub span: Span,
-    pub kind: ErrorKind,
+    pub offset: Offset,
+    pub tag: ErrorTag,
 }
 
 impl CompileError {
-    pub(crate) fn new(span: Span, kind: ErrorKind) -> Self {
-        CompileError { span, kind }
+    pub(crate) fn new(offset: Offset, tag: ErrorTag) -> Self {
+        CompileError { offset, tag }
     }
 }
 
@@ -122,7 +122,7 @@ impl fmt::Display for CompileError {
         write!(
             f,
             "{} (at {}..{})",
-            self.kind, self.span.start, self.span.end
+            self.tag, self.offset.start, self.offset.end
         )
     }
 }
