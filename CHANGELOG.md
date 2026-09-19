@@ -7,6 +7,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `attach` module (Linux only, behind the `attach` cargo feature): `attach(sock_fd, &program)`
+  attaches a compiled `Program` to a live socket via `setsockopt(SO_ATTACH_FILTER)`, so the
+  kernel filters the packets read from it. Programs with more than `u16::MAX` instructions are
+  rejected with `InvalidInput`; OS failures are returned as `io::Error`.
+- Tests for `attach` over loopback UDP (no root needed): the kernel keeps matching and drops
+  non-matching datagrams, and bad or non-socket descriptors are reported as OS errors.
+
 ## [0.1.0]
 
 First functional release: compiles pcap-filter expressions into classic BPF (cBPF) bytecode.
