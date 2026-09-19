@@ -21,6 +21,9 @@ mod parser;
 mod program;
 mod vm;
 
+#[cfg(all(feature = "attach", target_os = "linux"))]
+pub mod attach;
+
 pub use error::{CompileError, ErrorTag};
 pub use insn::{Insn, KEEP_WHOLE_PACKET};
 pub use linktype::LinkType;

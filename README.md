@@ -25,6 +25,12 @@ println!("{program}");
 (012) ret      #0x0
 ```
 
+## Attaching to a real socket
+
+The `attach` feature (Linux, pulls in `libc`) adds `cbpf_rs::attach`, a thin wrapper over `setsockopt(SOL_SOCKET, SO_ATTACH_FILTER)`. It is the only place in this crate that uses `unsafe` - every other module, including the interpreter, is safe Rust.
+
+That's possible because `Insn` is `#[repr(C)]` 😊, and field-for-field identical to the kernel's `struct sock_filter`, so handing a compiled program to the kernel is a pointer cast, not per-instruction marshaling.
+
 ## Manual testing
 
 Use [cbpf_dump](examples/cbpf_dump.rs) util with *pcap-filter expression* (e.g. **tcp port 80**) as an argument to compile it and print the resulting cBPF:

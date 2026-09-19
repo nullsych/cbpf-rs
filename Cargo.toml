@@ -10,4 +10,15 @@ keywords = ["bpf", "pcap", "packet", "networking", "filter"]
 categories = ["network-programming", "parser-implementations"]
 exclude = ["/.github", "/tests/corpus"]
 
+[features]
+default = ["std"]
+std = []
+
+# `attach` talks to a real OS socket, so it necessarily requires `std`
+# (a RawFd, std::io::Result) in addition to libc.
+attach = ["dep:libc", "std"]
+
 [dependencies]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { version = "0.2", optional = true }
