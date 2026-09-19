@@ -15,6 +15,13 @@ pub enum LinkType {
     Raw,
 }
 
+/// The link-layer offset info that codegen needs: where the network-layer header starts, and - if this link type
+/// multiplexes several network-layer protocols over one wire format - where the fieldthat says which one is.
+pub(crate) struct L3OffsetInfo {
+    pub ip_base: u32, // offset of IP start
+    pub ethertype_offset: Option<u32>,
+}
+
 impl LinkType {
     /// Convert from a `LINKTYPE_*` value, the number stored in a pcap savefile's global header
     /// (see the registry at <https://www.tcpdump.org/linktypes.html>).
@@ -35,6 +42,29 @@ impl LinkType {
             LinkType::LinuxSll => 113,
         }
     }
+
+    /// For each link type return IP base offset and ethtype offset of the header.
+    pub(crate) fn l3_offset_info(self) -> L3OffsetInfo {
+        match self {
+            // 14-byte IP base, Ethernet header: 6 dst + 6 src + 2 ethertype
+            LinkType::Ethernet => L3OffsetInfo {
+                ip_base: 14,
+                ethertype_offset: Some(12),
+            },
+
+            // 16-byte IP base, LinuxSll header: 2 packet-type + 2 ARPHRD_* + 2 addr-len + 8 padded address + 2 protocol-type
+            LinkType::LinuxSll => L3OffsetInfo {
+                ip_base: 16,
+                ethertype_offset: Some(14),
+            },
+
+            // 0-bute IP base, so Raw packet: no framing at all, we start from IP
+            LinkType::Raw => L3OffsetInfo {
+                ip_base: 0,
+                ethertype_offset: None,
+            },
+        }
+    }
 }
 
 #[cfg(test)]
@@ -51,5 +81,15 @@ mod tests {
     #[test]
     fn unknown_dlt_is_none() {
         assert_eq!(LinkType::from_dlt(0xffff), None);
+    }
+
+    #[test]
+    fn ethernet_has_an_ethertype_field() {
+        assert!(
+            LinkType::Ethernet
+                .l3_offset_info()
+                .ethertype_offset
+                .is_some()
+        );
     }
 }

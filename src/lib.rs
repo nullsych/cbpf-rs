@@ -2,8 +2,10 @@
 //! bytecode, and can run that bytecode against a packet with a small built-in interpreter.
 
 mod ast;
+mod codegen;
 mod desugar;
 mod error;
+mod irep;
 mod lexer;
 mod linktype;
 mod parser;
