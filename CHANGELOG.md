@@ -7,6 +7,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-19
+
 ### Added
 
 - `attach` module (Linux only, behind the `attach` cargo feature): `attach(sock_fd, &program)`
@@ -15,8 +17,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rejected with `InvalidInput`; OS failures are returned as `io::Error`.
 - Tests for `attach` over loopback UDP (no root needed): the kernel keeps matching and drops
   non-matching datagrams, and bad or non-socket descriptors are reported as OS errors.
+- Black-box tests of the public `compile()` entry point (`tests/black_box.rs`): the pinned
+  `tcp port 80` listing, `src`/`dst` expansion, fragmented packets never matching a port
+  primitive, `net` prefix masking, `and`/`or`/`not` with parentheses, inclusive `portrange`
+  bounds, and error reporting (unbalanced parentheses, invalid IPv4 literal offsets, `port` on a
+  non-transport protocol, IPv6 literals, non-Ethernet link types, jump displacement overflow).
+- Differential tests against a real `tcpdump` (`tests/differential.rs`): accept/reject decisions
+  on IPv4 packets are compared with `tcpdump -r` for `port`, `host`/`net`, `portrange`, fragments
+  and boolean connectives. The tests are skipped when `tcpdump` is not installed. Disassembly
+  text is deliberately not compared: libpcap also emits an IPv6 branch that this crate does not.
 
-## [0.1.0]
+## [0.1.0] - 2026-09-19
 
 First functional release: compiles pcap-filter expressions into classic BPF (cBPF) bytecode.
 
@@ -45,5 +56,6 @@ First functional release: compiles pcap-filter expressions into classic BPF (cBP
 - IPv6 (`ip6`, IPv6 address literals) is not implemented yet and returns
   `ErrorTag::Unimplemented`.
 
-[Unreleased]: https://github.com/nullsych/cbpf-rs/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/nullsych/cbpf-rs/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/nullsych/cbpf-rs/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/nullsych/cbpf-rs/releases/tag/v0.1.0
