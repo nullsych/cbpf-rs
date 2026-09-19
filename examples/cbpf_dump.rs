@@ -1,6 +1,5 @@
-//! `cbpf_dump` is a manual-testing helper: compile a pcap-filter expression and print the resulting
-//! cBPF program in `tcpdump -d` style, so it's easy to eyeball next to a real
-//! `tcpdump -d`/`tcpdump -ddd` run on the same filter.
+//! `cbpf_dump` is a manual-testing helper: compile a pcap-filter expression and print the resulting cBPF program in `tcpdump -d` style,
+//! so it's easy to track the diff btw `tcpdump -d`/`tcpdump -ddd` that runs on the same filter.
 //!
 //! ```text
 //! cargo run --example cbpf_dump -- 'tcp port 80'
