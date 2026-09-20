@@ -7,6 +7,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `LinkType::LinuxSll` support in `compile()`: filters can now be compiled for Linux cooked
+  captures (the `any` pseudo-interface), where the protocol type sits at byte 14 and the IP
+  header starts at byte 16. Covered by codegen and black-box tests.
+
+### Changed
+
+- `compile()` with `LinkType::LinuxSll` now returns a program instead of
+  `ErrorTag::UnsupportedLinkType`. Only `LinkType::Raw` is still rejected, because it has no
+  ethertype field to gate on.
+
 ## [0.1.1] - 2026-09-19
 
 ### Added

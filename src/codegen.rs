@@ -61,23 +61,19 @@ impl Branch {
 }
 
 /// Generate main cBPF from desugared expression.
-/// Note: generate() currently support only [`LinkType::Ethernet`].
+/// Note: generate() supports [`LinkType::Ethernet`] and [`LinkType::LinuxSll`], i.e. the link types with an ethertype field to gate on.
+/// [`LinkType::Raw`] is rejected with [`ErrorTag::UnsupportedLinkType`] until codegen can compile without that gate.
 pub(crate) fn generate(
     expr: &ExpandedExpr,
     link_type: LinkType,
     snaplen: u32,
 ) -> Result<IrProgram, CompileError> {
-    // todo!("Add LinuxSll & Raw support");
-    // #[allow(unreachable_code)]
-    if link_type != LinkType::Ethernet {
-        return Err(CompileError::new(0..0, ErrorTag::UnsupportedLinkType));
-    }
-
     // get base and offset
     let info = link_type.l3_offset_info();
-    let eth_field = info
-        .ethertype_offset
-        .expect("Ethernet always has an ethertype field");
+    // link type without such a field (Raw) can't be compiled yet
+    let Some(eth_field) = info.ethertype_offset else {
+        return Err(CompileError::new(0..0, ErrorTag::UnsupportedLinkType));
+    };
 
     // prepare intermediate representation
     let mut builder = IrBuilder::new();
@@ -725,15 +721,36 @@ mod tests {
         assert_eq!(render(&get_gen("tcp port 80")), expected);
     }
 
-    /// Must reject non-ethernet link types.
+    /// Same filter over Linux cooked capture: everything shifts by the 2 extra header bytes (ethertype at 14, `ip_base` 16).
     #[test]
-    fn non_ethernet_link_types() {
+    fn tcp_port_80_linux_sll() {
+        let program =
+            generate(&get_expanded("tcp port 80"), LinkType::LinuxSll, SNAPLEN).expect("codegen");
+        let expected = "\
+(000) ldh      [14]
+(001) jeq      #0x800  jt 2 jf 12
+(002) ldb      [25]
+(003) jeq      #0x6  jt 4 jf 12
+(004) ldh      [22]
+(005) jset     #0x1fff  jt 12 jf 6
+(006) ldxb     4*([16]&0xf)
+(007) ldh      [x + 16]
+(008) jeq      #0x50  jt 11 jf 9
+(009) ldh      [x + 18]
+(010) jeq      #0x50  jt 11 jf 12
+(011) ret      #4294967295
+(012) ret      #0
+";
+        assert_eq!(render(&program), expected);
+    }
+
+    /// Raw has no ethertype field to gate on, so it must be rejected.
+    #[test]
+    fn raw_link_type_is_rejected() {
         let exp = get_expanded("tcp port 80");
-        for lt in [LinkType::LinuxSll, LinkType::Raw] {
-            assert!(matches!(
-                generate(&exp, lt, SNAPLEN).unwrap_err().tag,
-                ErrorTag::UnsupportedLinkType
-            ));
-        }
+        assert!(matches!(
+            generate(&exp, LinkType::Raw, SNAPLEN).unwrap_err().tag,
+            ErrorTag::UnsupportedLinkType
+        ));
     }
 }

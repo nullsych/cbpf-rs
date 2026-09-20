@@ -209,8 +209,57 @@ fn ipv6_literals_are_reported_as_unimplemented_not_silently_wrong() {
     assert!(matches!(err.tag, ErrorTag::Unimplemented(_)));
 }
 
+/// Linux cooked capture (`any` interface): a 16-byte header with the protocol type at byte 14, so every IPv4/TCP offset is
+/// 2 bytes further than on Ethernet.
 #[test]
-fn non_ethernet_link_types_are_rejected_for_now() {
+fn linux_sll_tcp_port_80() {
+    let program = compile("tcp port 80", LinkType::LinuxSll, KEEP_WHOLE_PACKET).unwrap();
+
+    let mut packet = vec![0u8; 42];
+    packet[14] = 0x08;
+    packet[15] = 0x00; // protocol type IP
+    packet[16] = 0x45; // IHL = 5
+    packet[25] = 6; // proto TCP
+    packet[36] = 0x00;
+    packet[37] = 80; // src port 80
+    packet[38] = 0x00;
+    packet[39] = 1; // dst port 1
+    assert!(program.matches(&packet), "src port 80 should match");
+
+    packet[37] = 2;
+    packet[39] = 80;
+    assert!(program.matches(&packet), "dst port 80 should match");
+
+    packet[39] = 81;
+    assert!(!program.matches(&packet), "no port 80 should not match");
+
+    // The same bytes read as Ethernet must not match: the ethertype is not where Ethernet expects it.
+    let ethernet = compile("tcp port 80", LinkType::Ethernet, KEEP_WHOLE_PACKET).unwrap();
+    packet[39] = 80;
+    assert!(!ethernet.matches(&packet));
+}
+
+#[test]
+fn linux_sll_host_matches_the_address() {
+    let program = compile(
+        "ip src host 10.0.0.1",
+        LinkType::LinuxSll,
+        KEEP_WHOLE_PACKET,
+    )
+    .unwrap();
+
+    let mut packet = vec![0u8; 36];
+    packet[14] = 0x08;
+    packet[15] = 0x00;
+    packet[28..32].copy_from_slice(&[10, 0, 0, 1]); // ip_base 16 + src offset 12
+    assert!(program.matches(&packet));
+
+    packet[31] = 2;
+    assert!(!program.matches(&packet));
+}
+
+#[test]
+fn raw_link_type_is_rejected_for_now() {
     let err = compile("tcp port 80", LinkType::Raw, KEEP_WHOLE_PACKET).unwrap_err();
     assert_eq!(err.tag, ErrorTag::UnsupportedLinkType);
 }
