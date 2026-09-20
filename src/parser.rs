@@ -68,7 +68,7 @@ fn token_text(t: &Token) -> String {
 impl<'a> Parser<'a> {
     /// Get token at the current position
     fn peek(&self) -> &Token {
-        return &self.tokens[self.pos];
+        &self.tokens[self.pos]
     }
 
     /// Return the current token and step forward one position, stopping on the final `Eof`
@@ -77,7 +77,7 @@ impl<'a> Parser<'a> {
         if self.pos + 1 < self.tokens.len() {
             self.pos += 1;
         }
-        return t;
+        t
     }
 
     /// Get the current token's text if it is a [`TokenTag::Word`], else `None`.
