@@ -8,6 +8,9 @@
 //! println!("{program}");
 //! ```
 
+#![cfg_attr(not(feature = "std"), no_std)]
+extern crate alloc;
+
 mod ast;
 mod backpatch;
 mod codegen;

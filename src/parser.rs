@@ -9,6 +9,8 @@
 use crate::ast::{AddrLit, DirTag, Expr, PrimType, Primitive, ProtoTag};
 use crate::error::{CompileError, ErrorTag, Offset};
 use crate::lexer::{Token, TokenTag};
+use alloc::boxed::Box;
+use alloc::string::{String, ToString};
 
 pub(crate) fn parse(tokens: &[Token]) -> Result<Expr, CompileError> {
     // check if tokens are not empty (""), just first TokenTag
@@ -421,12 +423,12 @@ mod tests {
                         PrimType::Host(AddrLit::V4(a)) => out.push_str(&format!(" host={a:#x}")),
                         PrimType::Host(AddrLit::V6) => out.push_str(" host=v6"),
                         PrimType::Net(AddrLit::V4(a), pfx) => {
-                            out.push_str(&format!(" net={a:#x}/{pfx:?}"))
+                            out.push_str(&alloc::format!(" net={a:#x}/{pfx:?}"))
                         }
                         PrimType::Net(AddrLit::V6, _) => out.push_str(" net=v6"),
-                        PrimType::Port(p) => out.push_str(&format!(" port={p}")),
+                        PrimType::Port(p) => out.push_str(&alloc::format!(" port={p}")),
                         PrimType::PortRange(lo, hi) => {
-                            out.push_str(&format!(" portrange={lo}-{hi}"))
+                            out.push_str(&alloc::format!(" portrange={lo}-{hi}"))
                         }
                     }
                 }

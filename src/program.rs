@@ -3,6 +3,7 @@
 
 use crate::insn::{Insn, fmt_insn};
 use crate::vm;
+use alloc::vec::Vec;
 use core::fmt;
 
 /// A compiled, validated cBPF program.
@@ -52,17 +53,17 @@ mod tests {
 
     #[test]
     fn matches_is_sugar_for_run_nonzero() {
-        let program = Program::from_validated(vec![Insn::ret(KEEP_WHOLE_PACKET)]);
+        let program = Program::from_validated(alloc::vec![Insn::ret(KEEP_WHOLE_PACKET)]);
         assert!(program.matches(&[1, 2, 3]));
 
-        let program = Program::from_validated(vec![Insn::ret(0)]);
+        let program = Program::from_validated(alloc::vec![Insn::ret(0)]);
         assert!(!program.matches(&[1, 2, 3]));
     }
 
     #[test]
     fn display_joins_instructions_with_newlines() {
         let program =
-            Program::from_validated(vec![Insn::ldh_abs(12), Insn::ret(KEEP_WHOLE_PACKET)]);
+            Program::from_validated(alloc::vec![Insn::ldh_abs(12), Insn::ret(KEEP_WHOLE_PACKET)]);
         let rendered = format!("{program}");
         assert_eq!(rendered, "(000) ldh      [12]\n(001) ret      #0xffffffff");
     }

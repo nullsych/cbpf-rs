@@ -25,6 +25,10 @@ println!("{program}");
 (012) ret      #0x0
 ```
 
+## `no_std`
+
+The compiler and the interpreter are `no_std` + `alloc`; `std` is a default-on feature that can be turned off (`default-features = false`).
+
 ## Attaching to a real socket
 
 The `attach` feature (Linux, pulls in `libc`) adds `cbpf_rs::attach`, a thin wrapper over `setsockopt(SOL_SOCKET, SO_ATTACH_FILTER)`. It is the only place in this crate that uses `unsafe` - every other module, including the interpreter, is safe Rust.

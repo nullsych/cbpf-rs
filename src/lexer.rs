@@ -5,6 +5,8 @@
 //! String "tcp port 80" to tokens: [Word("tcp"), Word("port"), Word("80"), Eof].
 
 use crate::error::{CompileError, ErrorTag, Offset};
+use alloc::string::String;
+use alloc::vec::Vec;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Token {
@@ -144,7 +146,7 @@ mod tests {
     fn keywords_separated() {
         assert_eq!(
             words("tcp port 80"),
-            vec![
+            alloc::vec![
                 TokenTag::Word(String::from("tcp")),
                 TokenTag::Word(String::from("port")),
                 TokenTag::Word(String::from("80")),
@@ -168,7 +170,7 @@ mod tests {
     fn portrange_splits_on_dash() {
         assert_eq!(
             words("portrange 8000-8008"),
-            vec![
+            alloc::vec![
                 TokenTag::Word(String::from("portrange")),
                 TokenTag::Word(String::from("8000")),
                 TokenTag::Dash,
@@ -183,7 +185,7 @@ mod tests {
     fn cidr() {
         assert_eq!(
             words("1.2.3.0/24"),
-            vec![TokenTag::Word(String::from("1.2.3.0/24")), TokenTag::Eof]
+            alloc::vec![TokenTag::Word(String::from("1.2.3.0/24")), TokenTag::Eof]
         );
     }
 
@@ -192,7 +194,7 @@ mod tests {
     fn symbolic_connectives() {
         assert_eq!(
             words("tcp && !udp || arp"),
-            vec![
+            alloc::vec![
                 TokenTag::Word(String::from("tcp")),
                 TokenTag::Word(String::from("and")),
                 TokenTag::Word(String::from("not")),
@@ -225,7 +227,7 @@ mod tests {
     fn parens_are_tokenized() {
         assert_eq!(
             words("(tcp)"),
-            vec![
+            alloc::vec![
                 TokenTag::LParen,
                 TokenTag::Word(String::from("tcp")),
                 TokenTag::RParen,

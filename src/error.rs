@@ -1,5 +1,6 @@
 //! Error types shared by every compilation stage.
 
+use alloc::string::String;
 use core::fmt;
 use core::ops::Range;
 

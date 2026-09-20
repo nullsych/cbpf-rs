@@ -2,6 +2,7 @@
 //!
 
 use crate::error::Offset;
+use alloc::vec::Vec;
 
 /// An opaque handle to a not-yet-resolved instruction offset. Allocated by [`IrBuilder::new_label`],
 /// and must be placed exactly once with [`IrBuilder::place`] before `backpatch::assemble` runs.

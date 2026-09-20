@@ -4,6 +4,8 @@
 use crate::error::{CompileError, ErrorTag, Offset};
 use crate::insn::Insn;
 use crate::irep::{IrInsn, IrOp, IrOp2, IrProgram, Label};
+use alloc::vec;
+use alloc::vec::Vec;
 
 pub(crate) fn assemble(program: IrProgram) -> Result<Vec<Insn>, CompileError> {
     let IrProgram { stream, num_labels } = program;

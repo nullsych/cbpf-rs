@@ -3,6 +3,7 @@
 //! Every node carries a [`Offset`] back into the source text, so a [`crate::CompileError`] raised anywhere downstream can point at the exact text responsible.
 
 use crate::error::Offset;
+use alloc::boxed::Box;
 
 /// A boolean expression over [`Primitive`]s.
 #[derive(Debug, Clone, PartialEq, Eq)]

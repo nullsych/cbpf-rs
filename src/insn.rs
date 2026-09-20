@@ -247,7 +247,9 @@ pub(crate) fn fmt_insn(f: &mut fmt::Formatter<'_>, insn: Insn, index: usize) -> 
     }
 }
 
-fn describe(insn: Insn, index: usize) -> (&'static str, String) {
+fn describe(insn: Insn, index: usize) -> (&'static str, alloc::string::String) {
+    use alloc::format;
+
     match insn.decode() {
         Op::LdhAbs(k) => ("ldh", format!("[{k}]")),
         Op::LdbAbs(k) => ("ldb", format!("[{k}]")),
@@ -268,13 +270,14 @@ fn describe(insn: Insn, index: usize) -> (&'static str, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
 
     // These are pinned against libpcap's well-known `bpf_image()` format (`"(%03d) %-8s %s"` / `"(%03d) %-8s %-16s jt %d\tjf %d"`),
     // reconstructed from the widely mirrored bpf_image.c source. Re-check against a live `tcpdump -d` run when one is available
     // and adjust here if the local libpcap version prints anything differently.
     struct Line(Insn, usize, &'static str);
 
-    fn render(insn: Insn, index: usize) -> String {
+    fn render(insn: Insn, index: usize) -> alloc::string::String {
         struct Wrap(Insn, usize);
         impl fmt::Display for Wrap {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

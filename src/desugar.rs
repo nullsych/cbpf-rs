@@ -12,6 +12,8 @@
 
 use crate::ast::{DirTag, Expr, PrimType, Primitive, ProtoTag};
 use crate::error::Offset;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 /// The full protocol set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,13 +69,13 @@ pub(crate) fn expand(expr: &Expr) -> ExpandedExpr {
 
 fn expand_primitive(p: &Primitive) -> ExpandedExpr {
     let protos: Vec<CompiledProto> = match p.proto {
-        Some(proto) => vec![CompiledProto::from(proto)],
+        Some(proto) => alloc::vec![CompiledProto::from(proto)],
         None => match p.ty {
             PrimType::Host(_) | PrimType::Net(_, _) => {
-                vec![CompiledProto::Ip, CompiledProto::Arp, CompiledProto::Rarp]
+                alloc::vec![CompiledProto::Ip, CompiledProto::Arp, CompiledProto::Rarp]
             }
             PrimType::Port(_) | PrimType::PortRange(_, _) => {
-                vec![CompiledProto::Tcp, CompiledProto::Udp, CompiledProto::Sctp]
+                alloc::vec![CompiledProto::Tcp, CompiledProto::Udp, CompiledProto::Sctp]
             }
         },
     };
@@ -113,6 +115,7 @@ fn or_reduce(leaves: Vec<ExpandedExpr>) -> ExpandedExpr {
 mod tests {
     use super::*;
     use crate::ast::AddrLit;
+    use alloc::string::String;
 
     /// Renders an `ExpandedExpr` compactly for test assertions - spans aren't compared (a leaf's
     /// offset always equals the source `Primitive`'s offset at this stage, so comparing it adds nothing
@@ -135,18 +138,18 @@ mod tests {
                     DirTag::Dst => "dst",
                 };
                 let ty = match &p.ty {
-                    PrimType::Host(AddrLit::V4(a)) => format!("host={a:#x}"),
+                    PrimType::Host(AddrLit::V4(a)) => alloc::format!("host={a:#x}"),
                     PrimType::Host(AddrLit::V6) => String::from("host=v6"),
-                    PrimType::Net(AddrLit::V4(a), pfx) => format!("net={a:#x}/{pfx:?}"),
+                    PrimType::Net(AddrLit::V4(a), pfx) => alloc::format!("net={a:#x}/{pfx:?}"),
                     PrimType::Net(AddrLit::V6, _) => String::from("net=v6"),
-                    PrimType::Port(n) => format!("port={n}"),
-                    PrimType::PortRange(lo, hi) => format!("portrange={lo}-{hi}"),
+                    PrimType::Port(n) => alloc::format!("port={n}"),
+                    PrimType::PortRange(lo, hi) => alloc::format!("portrange={lo}-{hi}"),
                 };
-                format!("{proto}&{dir} {ty}")
+                alloc::format!("{proto}&{dir} {ty}")
             }
-            ExpandedExpr::Not(inner) => format!("!{}", render(inner)),
-            ExpandedExpr::And(l, r) => format!("({} & {})", render(l), render(r)),
-            ExpandedExpr::Or(l, r) => format!("({} | {})", render(l), render(r)),
+            ExpandedExpr::Not(inner) => alloc::format!("!{}", render(inner)),
+            ExpandedExpr::And(l, r) => alloc::format!("({} & {})", render(l), render(r)),
+            ExpandedExpr::Or(l, r) => alloc::format!("({} | {})", render(l), render(r)),
         }
     }
 
