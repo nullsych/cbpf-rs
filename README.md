@@ -1,6 +1,6 @@
 # 🦀 cbpf-rs
 
-A Rust compiler from pcap-filter (tcpdump/libpcap "primitive") expressions to classic BPF (cBPF) bytecode, plus a small interpreter to run that bytecode against a packet.
+A Rust compiler from pcap-filter (`tcpdump`/`libpcap` "primitive") expressions to classic BPF (cBPF) bytecode, plus a small interpreter to run that bytecode against a packet.
 
 ```rust
 use cbpf_rs::{compile, LinkType, KEEP_WHOLE_PACKET};
@@ -39,7 +39,7 @@ That's possible because `Insn` is `#[repr(C)]` 😊, and field-for-field identic
 
 Use [cbpf_dump](examples/cbpf_dump.rs) util with *pcap-filter expression* (e.g. **tcp port 80**) as an argument to compile it and print the resulting cBPF:
 
-```
+```sh
 $ cargo run --quiet --example cbpf_dump -- 'tcp port 80'
 (000) ldh      [12]
 (001) jeq      #0x800           jt 2    jf 12
