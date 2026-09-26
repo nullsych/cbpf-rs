@@ -348,3 +348,69 @@ fn a_sufficiently_large_or_chain_overflows_jump_displacement() {
     let err = compile(&filter, LinkType::Ethernet, KEEP_WHOLE_PACKET).unwrap_err();
     assert!(matches!(err.tag, ErrorTag::JumpDisplacementOverflow { .. }));
 }
+
+#[test]
+fn ipv6_host_matches_src_or_dst_by_default() {
+    let program = compile("host 2001:db8::1", LinkType::Ethernet, KEEP_WHOLE_PACKET).unwrap();
+
+    let mut packet = vec![0u8; 54];
+    packet[12] = 0x86;
+    packet[13] = 0xdd;
+    let addr = "2001:db8::1"
+        .parse::<std::net::Ipv6Addr>()
+        .unwrap()
+        .octets();
+
+    packet[22..38].copy_from_slice(&addr);
+    assert!(program.matches(&packet), "as src");
+
+    packet[22..38].fill(0);
+    packet[38..54].copy_from_slice(&addr);
+    assert!(program.matches(&packet), "as dst");
+
+    packet[53] ^= 1;
+    assert!(
+        !program.matches(&packet),
+        "one differing bit must not match"
+    );
+}
+
+#[test]
+fn ipv6_host_on_linux_sll() {
+    let program = compile("ip6 src host ::1", LinkType::LinuxSll, KEEP_WHOLE_PACKET).unwrap();
+
+    let mut packet = vec![0u8; 16 + 40];
+    packet[14] = 0x86;
+    packet[15] = 0xdd; // protocol type IPv6
+    packet[16 + 8 + 15] = 1; // src ::1
+    assert!(program.matches(&packet));
+
+    packet[16 + 8 + 15] = 2;
+    assert!(!program.matches(&packet));
+}
+
+#[test]
+fn invalid_ipv6_literal_reports_an_offset() {
+    let src = "host 1::2::3";
+    let err = compile(src, LinkType::Ethernet, KEEP_WHOLE_PACKET).unwrap_err();
+    assert!(matches!(err.tag, ErrorTag::InvalidIPv6Literal(_)));
+    assert_eq!(&src[err.offset.clone()], "1::2::3");
+}
+
+#[test]
+fn ipv6_address_with_an_ipv4_protocol_is_rejected() {
+    for src in ["ip host ::1", "ip6 host 1.2.3.4", "tcp host ::1"] {
+        let err = compile(src, LinkType::Ethernet, KEEP_WHOLE_PACKET).unwrap_err();
+        assert!(
+            matches!(err.tag, ErrorTag::InvalidPrimitiveCombination(_)),
+            "{src}: {err}"
+        );
+    }
+}
+
+/// Raw has no ethertype to tell IPv6 from IPv4 with, so `ip6` primitives are rejected there for now.
+#[test]
+fn ip6_is_rejected_on_raw() {
+    let err = compile("ip6 host ::1", LinkType::Raw, KEEP_WHOLE_PACKET).unwrap_err();
+    assert!(matches!(err.tag, ErrorTag::InvalidPrimitiveCombination(_)));
+}

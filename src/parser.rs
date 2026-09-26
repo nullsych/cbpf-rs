@@ -534,6 +534,79 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_host_keeps_its_value() {
+        assert_eq!(render("ip6 host ::1"), "ip6&* host6=0x1");
+        assert_eq!(
+            render("host 2001:db8::1"),
+            "*&* host6=0x20010db8000000000000000000000001"
+        );
+    }
+
+    #[test]
+    fn ipv6_compressed_and_mapped_forms() {
+        // `::` in the middle, at the start, at the end, and the IPv4-mapped tail form.
+        assert_eq!(
+            render("host 1:2::3"),
+            "*&* host6=0x10002000000000000000000000003"
+        );
+        assert_eq!(
+            render("host fe80::"),
+            "*&* host6=0xfe800000000000000000000000000000"
+        );
+        assert_eq!(render("host ::ffff:1.2.3.4"), "*&* host6=0xffff01020304");
+        assert_eq!(
+            render("host 1:2:3:4:5:6:7:8"),
+            "*&* host6=0x10002000300040005000600070008"
+        );
+    }
+
+    #[test]
+    fn ipv6_net_prefix_lengths() {
+        assert_eq!(
+            render("net 2001:db8::/32"),
+            "*&* net6=0x20010db8000000000000000000000000/Some(32)"
+        );
+        assert_eq!(render("net ::/0"), "*&* net6=0x0/Some(0)");
+        assert_eq!(render("net ::1/128"), "*&* net6=0x1/Some(128)");
+        assert_eq!(render("net ::1"), "*&* net6=0x1/None");
+    }
+
+    #[test]
+    fn invalid_ipv6_literals_are_errors() {
+        for src in [
+            "host 2001:db8:::1", // three colons
+            "host 1::2::3",      // two `::`
+            "host 12345::1",     // group wider than 16 bits
+            "host 1:2:3:4:5:6:7:8:9",
+            "host ::g",
+            "host :",
+        ] {
+            let tokens = lex(src).unwrap();
+            assert!(
+                matches!(
+                    parse(&tokens).unwrap_err().tag,
+                    ErrorTag::InvalidIPv6Literal(_)
+                ),
+                "{src} should be an invalid IPv6 literal"
+            );
+        }
+    }
+
+    #[test]
+    fn ipv6_prefix_must_be_at_most_128_and_only_on_net() {
+        for src in ["net ::1/129", "net ::1/x", "host ::1/64"] {
+            let tokens = lex(src).unwrap();
+            assert!(
+                matches!(
+                    parse(&tokens).unwrap_err().tag,
+                    ErrorTag::InvalidIPv6Literal(_)
+                ),
+                "{src} should be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn portrange_lo_gt_hi_is_an_error() {
         let tokens = lex("portrange 90-80").unwrap();
         let err = parse(&tokens).unwrap_err();

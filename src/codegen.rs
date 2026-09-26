@@ -922,4 +922,130 @@ mod tests {
             ErrorTag::InvalidPrimitiveCombination(_)
         ));
     }
+
+    #[test]
+    fn ip6_src_host() {
+        // Same listing as `tcpdump -d 'ip6 src host 2001:db8::1'`, up to the `ret` value (snaplen).
+        let expected = "\
+(000) ldh      [12]
+(001) jeq      #0x86dd  jt 2 jf 11
+(002) ld       [22]
+(003) jeq      #0x20010db8  jt 4 jf 11
+(004) ld       [26]
+(005) jeq      #0x0  jt 6 jf 11
+(006) ld       [30]
+(007) jeq      #0x0  jt 8 jf 11
+(008) ld       [34]
+(009) jeq      #0x1  jt 10 jf 11
+(010) ret      #4294967295
+(011) ret      #0
+";
+        assert_eq!(render(&get_gen("ip6 src host 2001:db8::1")), expected);
+    }
+
+    /// A prefix ending inside a word masks only that word, and the words after it are not compared at all.
+    /// A /33 needs two words: all of the first, and the top bit of the second (dst words are at 14 + 24 = 38 and 42).
+    #[test]
+    fn ip6_net_prefix_ending_inside_a_word() {
+        let expected = "\
+(000) ldh      [12]
+(001) jeq      #0x86dd  jt 2 jf 8
+(002) ld       [38]
+(003) jeq      #0x20010db8  jt 4 jf 8
+(004) ld       [42]
+(005) and      #0x80000000
+(006) jeq      #0x0  jt 7 jf 8
+(007) ret      #4294967295
+(008) ret      #0
+";
+        assert_eq!(render(&get_gen("ip6 dst net 2001:db8::/33")), expected);
+    }
+
+    #[test]
+    fn ip6_net_prefix_on_a_word_boundary_needs_no_mask() {
+        let listing = render(&get_gen("ip6 src net 2001:db8::/32"));
+        assert!(
+            !listing.contains("and"),
+            "a /32 is exactly one whole word:\n{listing}"
+        );
+        assert!(listing.contains("ld       [22]"));
+        assert!(!listing.contains("[26]"));
+    }
+
+    /// `/0` matches every IPv6 packet: only the ethertype gate remains, then an unconditional jump to accept.
+    #[test]
+    fn ip6_net_zero_prefix_matches_every_ipv6_packet() {
+        let expected = "\
+(000) ldh      [12]
+(001) jeq      #0x86dd  jt 2 jf 4
+(002) ja       3
+(003) ret      #4294967295
+(004) ret      #0
+";
+        assert_eq!(render(&get_gen("ip6 src net ::/0")), expected);
+    }
+
+    #[test]
+    fn ip6_net_full_prefix_equals_host() {
+        assert_eq!(
+            render(&get_gen("ip6 dst net ::1/128")),
+            render(&get_gen("ip6 dst host ::1"))
+        );
+    }
+
+    /// The bare `host` form expands to `ip6 src or ip6 dst`, which must share one ethertype gate.
+    #[test]
+    fn bare_ip6_host_shares_the_ethertype_gate() {
+        let listing = render(&get_gen("host ::1"));
+        assert_eq!(listing.matches("ldh      [12]").count(), 1, "{listing}");
+        assert_eq!(listing.matches("#0x86dd").count(), 1, "{listing}");
+        assert!(listing.contains("ld       [22]"), "src words:\n{listing}");
+        assert!(listing.contains("ld       [38]"), "dst words:\n{listing}");
+    }
+
+    #[test]
+    fn ip6_host_on_linux_sll_shifts_by_two_bytes() {
+        let program = generate(
+            &get_expanded("ip6 src host ::1"),
+            LinkType::LinuxSll,
+            SNAPLEN,
+        )
+        .expect("codegen");
+        let listing = render(&program);
+        assert!(listing.starts_with("(000) ldh      [14]\n(001) jeq      #0x86dd"));
+        assert!(listing.contains("ld       [24]")); // ip_base 16 + 8
+    }
+
+    #[test]
+    fn ipv6_address_needs_the_ip6_protocol() {
+        for src in ["ip host ::1", "arp host ::1", "ip src net ::1/64"] {
+            let exp = get_expanded(src);
+            assert!(
+                matches!(
+                    generate(&exp, LinkType::Ethernet, SNAPLEN).unwrap_err().tag,
+                    ErrorTag::InvalidPrimitiveCombination(_)
+                ),
+                "{src}"
+            );
+        }
+    }
+
+    #[test]
+    fn ip6_rejects_an_ipv4_address() {
+        let exp = get_expanded("ip6 host 1.2.3.4");
+        assert!(matches!(
+            generate(&exp, LinkType::Ethernet, SNAPLEN).unwrap_err().tag,
+            ErrorTag::InvalidPrimitiveCombination(_)
+        ));
+    }
+
+    /// Raw has no ethertype to tell IPv6 from IPv4 with, so an `ip6` primitive can't be compiled for it yet.
+    #[test]
+    fn ip6_is_rejected_on_raw() {
+        let exp = get_expanded("ip6 host ::1");
+        assert!(matches!(
+            generate(&exp, LinkType::Raw, SNAPLEN).unwrap_err().tag,
+            ErrorTag::InvalidPrimitiveCombination(_)
+        ));
+    }
 }

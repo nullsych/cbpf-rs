@@ -204,6 +204,16 @@ mod tests {
     }
 
     #[test]
+    fn bare_ipv6_host_is_ip6_only() {
+        // An IPv6 address can't be an arp/rarp address, so the default protocol set collapses to just `ip6`.
+        assert_eq!(
+            expand_src("host ::1"),
+            "(ip6&src host6=0x1 | ip6&dst host6=0x1)"
+        );
+        assert_eq!(expand_src("src net ::1/64"), "ip6&src net6=0x1/Some(64)");
+    }
+
+    #[test]
     fn not_and_or_pass_through_structurally() {
         assert_eq!(
             expand_src("tcp src port 80 and not udp dst port 53"),

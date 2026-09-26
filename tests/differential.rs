@@ -126,6 +126,32 @@ impl Pkt {
     }
 }
 
+/// A minimal Ethernet + IPv6 + UDP packet (the transport header is empty: only the addresses matter to these tests).
+struct Pkt6(Vec<u8>);
+
+impl Pkt6 {
+    fn new() -> Self {
+        let mut b = vec![0u8; 14 + 40 + 8];
+        b[12] = 0x86;
+        b[13] = 0xdd; // ethertype IPv6
+        b[14] = 0x60; // version 6
+        b[18..20].copy_from_slice(&8u16.to_be_bytes()); // payload length
+        b[20] = UDP; // next header
+        b[21] = 64; // hop limit
+        Pkt6(b)
+    }
+
+    fn src_addr(mut self, a: &str) -> Self {
+        self.0[22..38].copy_from_slice(&a.parse::<std::net::Ipv6Addr>().unwrap().octets());
+        self
+    }
+
+    fn dst_addr(mut self, a: &str) -> Self {
+        self.0[38..54].copy_from_slice(&a.parse::<std::net::Ipv6Addr>().unwrap().octets());
+        self
+    }
+}
+
 const TCP: u8 = 6;
 const UDP: u8 = 17;
 
@@ -230,4 +256,63 @@ fn boolean_connectives_agree_with_tcpdump() {
         &Pkt::new(TCP).src_addr([192, 168, 1, 1]).ports(22, 4000).0,
         "wrong port",
     );
+}
+
+#[test]
+fn ipv6_host_agrees_with_tcpdump() {
+    let src = Pkt6::new().src_addr("2001:db8::1").dst_addr("fe80::9");
+    let dst = Pkt6::new().src_addr("fe80::9").dst_addr("2001:db8::1");
+    let other = Pkt6::new().src_addr("2001:db8::2").dst_addr("fe80::9");
+
+    for filter in ["ip6 host 2001:db8::1", "host 2001:db8::1"] {
+        assert_agrees(filter, &src.0, "as src");
+        assert_agrees(filter, &dst.0, "as dst");
+        assert_agrees(filter, &other.0, "no match");
+    }
+    assert_agrees("ip6 src host 2001:db8::1", &src.0, "src filter, as src");
+    assert_agrees("ip6 src host 2001:db8::1", &dst.0, "src filter, as dst");
+    assert_agrees("ip6 dst host 2001:db8::1", &dst.0, "dst filter, as dst");
+    assert_agrees("ip6 dst host 2001:db8::1", &src.0, "dst filter, as src");
+    // The last word differing by a single bit must not match.
+    assert_agrees("ip6 host 2001:db8::1", &other.0, "differs in the last bit");
+}
+
+#[test]
+fn ipv6_net_prefixes_agree_with_tcpdump() {
+    let addrs = [
+        "2001:db8::1",
+        "2001:db8:0:1::1",
+        "2001:db8:8000::1",
+        "2001:db9::1",
+        "2001:db8:ffff:ffff:ffff:ffff:ffff:ffff",
+        "::1",
+    ];
+    // Prefix lengths that end on a word boundary, one bit into a word, one bit short of the next, and the extremes.
+    for prefix in [0, 1, 31, 32, 33, 47, 48, 63, 64, 65, 96, 127, 128] {
+        let filter = format!("ip6 src net 2001:db8::/{prefix}");
+        for a in addrs {
+            assert_agrees(
+                &filter,
+                &Pkt6::new().src_addr(a).dst_addr("fe80::9").0,
+                &format!("src {a}"),
+            );
+        }
+    }
+    // The address is masked before comparing, so host bits set in the filter's address are ignored, as in libpcap.
+    assert_agrees(
+        "ip6 src net 2001:db8:0:ff::/32",
+        &Pkt6::new().src_addr("2001:db8::7").0,
+        "host bits in the filter address",
+    );
+}
+
+#[test]
+fn ipv6_filters_never_match_ipv4_packets_and_vice_versa() {
+    let v4 = Pkt::new(UDP).src_addr([10, 0, 0, 1]);
+    let v6 = Pkt6::new().src_addr("::ffff:10.0.0.1");
+    assert_agrees("ip6 host ::ffff:10.0.0.1", &v4.0, "IPv4 packet, ip6 filter");
+    assert_agrees("ip6 host ::ffff:10.0.0.1", &v6.0, "IPv6 mapped address");
+    assert_agrees("ip host 10.0.0.1", &v6.0, "IPv6 packet, ip filter");
+    assert_agrees("net ::/0", &v4.0, "::/0 on an IPv4 packet");
+    assert_agrees("net ::/0", &v6.0, "::/0 on an IPv6 packet");
 }
