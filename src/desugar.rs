@@ -4,13 +4,13 @@
 //! an [`ExpandedExpr`] with concrete protocol and direction, so it matching libpcap's
 //! own defaulting rules, e.g.:
 //!
-//! - No `proto`: `host`/`net` default to `ip or arp or rarp`; `port`/`portrange` default to
+//! - No `proto`: `host`/`net` default to `ip or arp or rarp` (or just `ip6` for an IPv6 address); `port`/`portrange` default to
 //!   `tcp or udp or sctp`.
 //! - No `dir`: defaults to `src or dst`.
 //!
 //! `Not`/`And`/`Or` nodes pass through structurally unchanged - only `Primitive` leaves expand.
 
-use crate::ast::{DirTag, Expr, PrimType, Primitive, ProtoTag};
+use crate::ast::{AddrLit, DirTag, Expr, PrimType, Primitive, ProtoTag};
 use crate::error::Offset;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -71,6 +71,10 @@ fn expand_primitive(p: &Primitive) -> ExpandedExpr {
     let protos: Vec<CompiledProto> = match p.proto {
         Some(proto) => alloc::vec![CompiledProto::from(proto)],
         None => match p.ty {
+            // An IPv6 address can only ever mean `ip6`; arp/rarp carry IPv4 addresses.
+            PrimType::Host(AddrLit::V6(_)) | PrimType::Net(AddrLit::V6(_), _) => {
+                alloc::vec![CompiledProto::Ip6]
+            }
             PrimType::Host(_) | PrimType::Net(_, _) => {
                 alloc::vec![CompiledProto::Ip, CompiledProto::Arp, CompiledProto::Rarp]
             }
@@ -139,9 +143,9 @@ mod tests {
                 };
                 let ty = match &p.ty {
                     PrimType::Host(AddrLit::V4(a)) => alloc::format!("host={a:#x}"),
-                    PrimType::Host(AddrLit::V6) => String::from("host=v6"),
+                    PrimType::Host(AddrLit::V6(a)) => alloc::format!("host6={a:#x}"),
                     PrimType::Net(AddrLit::V4(a), pfx) => alloc::format!("net={a:#x}/{pfx:?}"),
-                    PrimType::Net(AddrLit::V6, _) => String::from("net=v6"),
+                    PrimType::Net(AddrLit::V6(a), pfx) => alloc::format!("net6={a:#x}/{pfx:?}"),
                     PrimType::Port(n) => alloc::format!("port={n}"),
                     PrimType::PortRange(lo, hi) => alloc::format!("portrange={lo}-{hi}"),
                 };

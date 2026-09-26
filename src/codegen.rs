@@ -11,6 +11,7 @@ use crate::linktype::LinkType;
 const ETH_TYPE_IP: u32 = 0x0800;
 const ETH_TYPE_ARP: u32 = 0x0806;
 const ETH_TYPE_RARP: u32 = 0x8035;
+const ETH_TYPE_IPV6: u32 = 0x86dd;
 
 const IP_PROTO_ICMP: u32 = 1;
 const IP_PROTO_TCP: u32 = 6;
@@ -25,6 +26,11 @@ const IP_DST_OFFSET: u32 = 16;
 /// The 13-bit fragment-offset field, ignoring the 3 reserved/DF/MF bits above it: nonzero means
 /// "not the first fragment".
 const FRAG_MASK: u32 = 0x1fff;
+
+// IPv6 header field offsets, relative to `ip_base` (fixed 40-byte header: 4 version/class/flow + 2 length + 1 next header +
+// 1 hop limit, then the two 16-byte addresses).
+const IP6_SRC_OFFSET: u32 = 8;
+const IP6_DST_OFFSET: u32 = 24;
 
 // ARP packet field offsets, relative to `ip_base` (standard Ethernet/IPv4 ARP: 2 hw-type +
 // 2 proto-type + 1 hw-len + 1 proto-len + 2 opcode = 8, then 6-byte sender hw addr).
@@ -176,6 +182,14 @@ fn differs_only_in_dir(p1: &CompiledPrimitive, p2: &CompiledPrimitive) -> bool {
     p1.proto == p2.proto && p1.dir != p2.dir && p1.ty == p2.ty
 }
 
+/// The prefix length of a `net` literal written without `/n`: the whole address.
+fn full_prefix(addr: &AddrLit) -> u8 {
+    match addr {
+        AddrLit::V4(_) => 32,
+        AddrLit::V6(_) => 128,
+    }
+}
+
 /// Compiles a single primitive, dispatching on its type: `host`/`net` to [`compile_addr`] (a
 /// missing prefix means /32), `port`/`portrange` to [`compile_port`] (a single port is the range
 /// `p..=p`).
@@ -186,9 +200,13 @@ fn compile_primitive(
 ) -> Result<(), CompileError> {
     match &p.ty {
         PrimType::Host(addr) => compile_addr(p, ctx, addr, None, branch),
-        PrimType::Net(addr, prefix) => {
-            compile_addr(p, ctx, addr, Some(prefix.unwrap_or(32)), branch)
-        }
+        PrimType::Net(addr, prefix) => compile_addr(
+            p,
+            ctx,
+            addr,
+            Some(prefix.unwrap_or(full_prefix(addr))),
+            branch,
+        ),
         PrimType::Port(port) => compile_port(p, ctx, *port, *port, branch),
         PrimType::PortRange(lo, hi) => compile_port(p, ctx, *lo, *hi, branch),
     }
@@ -205,9 +223,14 @@ fn compile_dir_pair(
 ) -> Result<(), CompileError> {
     match &p1.ty {
         PrimType::Host(addr) => compile_addr_pair(p1, p2, ctx, addr, None, branch),
-        PrimType::Net(addr, prefix) => {
-            compile_addr_pair(p1, p2, ctx, addr, Some(prefix.unwrap_or(32)), branch)
-        }
+        PrimType::Net(addr, prefix) => compile_addr_pair(
+            p1,
+            p2,
+            ctx,
+            addr,
+            Some(prefix.unwrap_or(full_prefix(addr))),
+            branch,
+        ),
         PrimType::Port(port) => compile_port_pair(p1, p2, ctx, *port, *port, branch),
         PrimType::PortRange(lo, hi) => compile_port_pair(p1, p2, ctx, *lo, *hi, branch),
     }
@@ -265,10 +288,13 @@ fn addr_gates(proto: CompiledProto, offset: &Offset) -> Result<AddrGates, Compil
             src_offset: ARP_SENDER_PA_OFFSET,
             dst_offset: ARP_TARGET_PA_OFFSET,
         },
+        // IPv6 addresses take the four-word path in `compile_addr6`; only an IPv4 literal ends up here.
         CompiledProto::Ip6 => {
             return Err(CompileError::new(
                 offset.clone(),
-                ErrorTag::Unimplemented("ip6 host/net"),
+                ErrorTag::InvalidPrimitiveCombination(
+                    "'ip6' needs an IPv6 address, not an IPv4 one",
+                ),
             ));
         }
         // Structurally unreachable today (desugar never produces Sctp for Host/Net, and the parser
@@ -295,7 +321,10 @@ fn compile_addr(
     prefix: Option<u8>,
     branch: Branch,
 ) -> Result<(), CompileError> {
-    let addr_val = ipv4_or_error(addr, &p.offset)?;
+    let addr_val = match addr {
+        AddrLit::V4(a) => *a,
+        AddrLit::V6(a) => return compile_addr6(p, None, ctx, *a, prefix, branch),
+    };
     let gates = addr_gates(p.proto, &p.offset)?;
     ensure_ethertype_available(ctx, &gates, &p.offset)?;
     let offset = p.offset.clone();
@@ -326,7 +355,10 @@ fn compile_addr_pair(
     prefix: Option<u8>,
     branch: Branch,
 ) -> Result<(), CompileError> {
-    let addr_val = ipv4_or_error(addr, &p1.offset)?;
+    let addr_val = match addr {
+        AddrLit::V4(a) => *a,
+        AddrLit::V6(a) => return compile_addr6(p1, Some(p2), ctx, *a, prefix, branch),
+    };
     let gates = addr_gates(p1.proto, &p1.offset)?;
     ensure_ethertype_available(ctx, &gates, &p1.offset)?;
     let offset = p1.offset.clone();
@@ -362,14 +394,111 @@ fn compile_addr_pair(
     Ok(())
 }
 
-/// Extracts the IPv4 address as a host-order `u32`, or reports IPv6 literals as unimplemented.
-fn ipv4_or_error(addr: &AddrLit, offset: &Offset) -> Result<u32, CompileError> {
-    match addr {
-        AddrLit::V4(a) => Ok(*a),
-        AddrLit::V6 => Err(CompileError::new(
+/// Compiles an IPv6 `host`/`net`: the IPv6 ethertype gate, then the address compared as four 32-bit words (`prefix` defaults to
+/// all 128 bits). With `second` set, this is a `src`/`dst` pair sharing the gate, `first` being tried before it.
+fn compile_addr6(
+    first: &CompiledPrimitive,
+    second: Option<&CompiledPrimitive>,
+    ctx: &mut Ctx,
+    addr: u128,
+    prefix: Option<u8>,
+    branch: Branch,
+) -> Result<(), CompileError> {
+    let offset = first.offset.clone();
+    if first.proto != CompiledProto::Ip6 {
+        return Err(CompileError::new(
+            offset,
+            ErrorTag::InvalidPrimitiveCombination("an IPv6 address needs 'ip6' (or no protocol)"),
+        ));
+    }
+    let gates = AddrGates {
+        ethertype: ETH_TYPE_IPV6,
+        ip_proto: None,
+        src_offset: IP6_SRC_OFFSET,
+        dst_offset: IP6_DST_OFFSET,
+    };
+    ensure_ethertype_available(ctx, &gates, &offset)?;
+    emit_ethertype_and_proto_gates(ctx, gates.ethertype, None, offset.clone(), branch.on_false);
+
+    let prefix = u32::from(prefix.unwrap_or(128));
+    match second {
+        None => emit_addr6_terminal(ctx, &gates, first.dir, addr, prefix, offset, branch),
+        Some(second) => {
+            let mid = ctx.b.new_label();
+            emit_addr6_terminal(
+                ctx,
+                &gates,
+                first.dir,
+                addr,
+                prefix,
+                offset.clone(),
+                Branch {
+                    on_true: branch.on_true,
+                    on_false: mid,
+                },
+            );
+            ctx.b.place(mid);
+            emit_addr6_terminal(ctx, &gates, second.dir, addr, prefix, offset, branch);
+        }
+    }
+    Ok(())
+}
+
+/// Emits the IPv6 comparison for one direction: for each 32-bit word the `prefix` reaches, `ld; [and mask;] jeq`. Any mismatch goes to
+/// `on_false`; a match falls through to the next word, and the last word's match goes to `on_true`. Words past the prefix are not
+/// examined, so `/0` compares nothing and always matches.
+fn emit_addr6_terminal(
+    ctx: &mut Ctx,
+    gates: &AddrGates,
+    dir: DirTag,
+    addr: u128,
+    prefix: u32,
+    offset: Offset,
+    branch: Branch,
+) {
+    let step = match dir {
+        DirTag::Src => gates.src_offset,
+        DirTag::Dst => gates.dst_offset,
+    };
+    let words = prefix.div_ceil(32);
+    if words == 0 {
+        ctx.b.emit(
+            IrOp2::Jmp {
+                target: branch.on_true,
+            },
+            offset,
+        );
+        return;
+    }
+    for i in 0..words {
+        // Word `i` covers address bits `32*i .. 32*i + 32` counted from the most significant end.
+        let shift = 96 - 32 * i;
+        let word = (addr >> shift) as u32;
+        let bits_in_prefix = (prefix - 32 * i).min(32);
+        let mask = netmask(bits_in_prefix as u8);
+        let last = i == words - 1;
+        let next = if last {
+            branch.on_true
+        } else {
+            ctx.b.new_label()
+        };
+
+        ctx.b
+            .emit(IrOp2::LdwAbs(ctx.ip_base + step + 4 * i), offset.clone());
+        if mask != u32::MAX {
+            ctx.b.emit(IrOp2::AndK(mask), offset.clone());
+        }
+        ctx.b.emit(
+            IrOp2::Jeq {
+                imm: word & mask,
+                jt: next,
+                jf: branch.on_false,
+            },
             offset.clone(),
-            ErrorTag::Unimplemented("ipv6 address literals"),
-        )),
+        );
+        if !last {
+            ctx.b.place(next);
+        }
     }
 }
 
@@ -564,7 +693,7 @@ fn emit_port_terminal(
     }
 }
 
-/// `arp`/`rarp` are identified by their ethertype alone, so they can't be expressed on a link type that has none.
+/// `arp`/`rarp`/`ip6` are identified by their ethertype alone, so they can't be expressed on a link type that has none.
 fn ensure_ethertype_available(
     ctx: &Ctx,
     gates: &AddrGates,
@@ -574,7 +703,7 @@ fn ensure_ethertype_available(
         return Err(CompileError::new(
             offset.clone(),
             ErrorTag::InvalidPrimitiveCombination(
-                "'arp'/'rarp' need a link layer with an ethertype field; this link type has none",
+                "'arp'/'rarp'/'ip6' need a link layer with an ethertype field; this link type has none",
             ),
         ));
     }

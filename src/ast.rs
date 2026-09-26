@@ -56,9 +56,9 @@ pub(crate) enum PrimType {
 
 /// An address literal.
 ///
-/// Note: IPv6 text is recognized (so `ip6 host ::1` parses) but isn't implemented in this MVP yet.
+/// Both variants hold the address in network (big-endian) bit order as one integer, so the top bits are the network prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AddrLit {
     V4(u32),
-    V6,
+    V6(u128),
 }

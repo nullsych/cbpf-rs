@@ -27,6 +27,8 @@ pub enum ErrorTag {
     UnknownKeyword(String),
     /// Text that was expected to be an IPv4 address/CIDR literal didn't parse as one.
     InvalidIPv4Literal(String),
+    /// Text that was expected to be an IPv6 address/prefix literal didn't parse as one.
+    InvalidIPv6Literal(String),
     /// Text that was expected to be a port number didn't parse as one (or is out of range).
     InvalidPortNumber(String),
     /// A `portrange` primitive had `lo > hi`.
@@ -47,7 +49,7 @@ pub enum ErrorTag {
     },
     /// `compile()` was asked for a [`crate::LinkType`] that has no support yet.
     UnsupportedLinkType,
-    /// The construct parsed but program generation for it isn't implemented yet (e.g. IPv6 address literals).
+    /// The construct parsed but program generation for it isn't implemented yet (e.g. IPv6 primitives beyond `host`/`net`).
     Unimplemented(&'static str),
     /// A syntactically valid `proto`/`type` pairing that doesn't mean anything (e.g. `arp port 80` -
     /// ARP has no notion of a port).
@@ -71,6 +73,10 @@ impl fmt::Display for ErrorTag {
 
             ErrorTag::InvalidIPv4Literal(text) => {
                 write!(f, "'{text}' is not a valid IPv4 address or network")
+            }
+
+            ErrorTag::InvalidIPv6Literal(text) => {
+                write!(f, "'{text}' is not a valid IPv6 address or network")
             }
 
             ErrorTag::InvalidPortNumber(text) => write!(f, "'{text}' is not a valid port number"),

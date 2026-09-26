@@ -203,10 +203,48 @@ fn port_on_a_non_transport_protocol_is_rejected() {
     assert!(matches!(err.tag, ErrorTag::InvalidPrimitiveCombination(_)));
 }
 
+/// A bare `net <ipv6>/33` (no `ip6`, no `dir`) is read as `ip6 src or dst`. The /33 prefix ends one bit into the second 32-bit
+/// word, so this exercises both a whole-word compare and a partially masked one.
 #[test]
-fn ipv6_literals_are_reported_as_unimplemented_not_silently_wrong() {
-    let err = compile("host ::1", LinkType::Ethernet, KEEP_WHOLE_PACKET).unwrap_err();
-    assert!(matches!(err.tag, ErrorTag::Unimplemented(_)));
+fn ipv6_net_matches_the_prefix() {
+    let program = compile("net 2001:db8::/33", LinkType::Ethernet, KEEP_WHOLE_PACKET).unwrap();
+
+    let mut packet = vec![0u8; 54];
+    packet[12] = 0x86;
+    packet[13] = 0xdd; // ethertype IPv6
+    // IPv6 header starts at 14; src address at 14 + 8, dst at 14 + 24.
+    let inside = [
+        0x20, 0x01, 0x0d, 0xb8, 0x7f, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+    ];
+    let outside = [
+        0x20, 0x01, 0x0d, 0xb8, 0x80, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+    ];
+
+    packet[22..38].copy_from_slice(&inside);
+    packet[38..54].copy_from_slice(&outside);
+    assert!(
+        program.matches(&packet),
+        "src inside the prefix should match"
+    );
+
+    packet[22..38].copy_from_slice(&outside);
+    packet[38..54].copy_from_slice(&inside);
+    assert!(
+        program.matches(&packet),
+        "dst inside the prefix should match"
+    );
+
+    packet[38..54].copy_from_slice(&outside);
+    assert!(
+        !program.matches(&packet),
+        "neither address inside the prefix"
+    );
+
+    // The same bytes with an IPv4 ethertype must not match: the ethertype gate is what tells IPv6 apart.
+    packet[22..38].copy_from_slice(&inside);
+    packet[12] = 0x08;
+    packet[13] = 0x00;
+    assert!(!program.matches(&packet));
 }
 
 /// Linux cooked capture (`any` interface): a 16-byte header with the protocol type at byte 14, so every IPv4/TCP offset is

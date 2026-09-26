@@ -354,16 +354,14 @@ fn parse_ipv4_octets(text: &str) -> Option<u32> {
 
 /// Parses an address literal, optionally followed by `/<prefix>` when `allow_prefix` is true (used for `net`, not `host`).
 ///
-/// IPv6-looking text (anything containing `:`) is accepted syntactically - `ip6 host ::1` parses - but its value is discarded:
-/// currently the crate doesn't implement IPv6 address matching for now and will reject
-/// it with [`crate::ErrorTag::Unimplemented`] rather than emit anything wrong.
+/// Text containing `:` is parsed as an IPv6 literal, everything else as an IPv4 one.
 fn parse_addr_literal(
     text: &str,
     offset: Offset,
     allow_prefix: bool,
 ) -> Result<(AddrLit, Option<u8>), CompileError> {
     if text.contains(':') {
-        return Ok((AddrLit::V6, None));
+        return parse_ipv6_literal(text, offset, allow_prefix);
     }
 
     let (addr_part, prefix_part) = match text.split_once('/') {
@@ -395,6 +393,41 @@ fn parse_addr_literal(
     Ok((AddrLit::V4(addr), prefix))
 }
 
+/// Parses an IPv6 literal (`::1`, `2001:db8::`, `::ffff:1.2.3.4`), optionally followed by `/<prefix>` (0..=128) when `allow_prefix` is true.
+fn parse_ipv6_literal(
+    text: &str,
+    offset: Offset,
+    allow_prefix: bool,
+) -> Result<(AddrLit, Option<u8>), CompileError> {
+    let (addr_part, prefix_part) = match text.split_once('/') {
+        Some((a, p)) => (a, Some(p)),
+        None => (text, None),
+    };
+
+    let invalid = || {
+        CompileError::new(
+            offset.clone(),
+            ErrorTag::InvalidIPv6Literal(String::from(text)),
+        )
+    };
+
+    let addr: core::net::Ipv6Addr = addr_part.parse().map_err(|_| invalid())?;
+
+    let prefix = match prefix_part {
+        Some(p) if allow_prefix => {
+            let n: u8 = p.parse().map_err(|_| invalid())?;
+            if n > 128 {
+                return Err(invalid());
+            }
+            Some(n)
+        }
+        Some(_) => return Err(invalid()), // a prefix on a host literal
+        None => None,
+    };
+
+    Ok((AddrLit::V6(u128::from(addr)), prefix))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,11 +454,15 @@ mod tests {
                     });
                     match &p.ty {
                         PrimType::Host(AddrLit::V4(a)) => out.push_str(&format!(" host={a:#x}")),
-                        PrimType::Host(AddrLit::V6) => out.push_str(" host=v6"),
+                        PrimType::Host(AddrLit::V6(a)) => {
+                            out.push_str(&alloc::format!(" host6={a:#x}"))
+                        }
                         PrimType::Net(AddrLit::V4(a), pfx) => {
                             out.push_str(&alloc::format!(" net={a:#x}/{pfx:?}"))
                         }
-                        PrimType::Net(AddrLit::V6, _) => out.push_str(" net=v6"),
+                        PrimType::Net(AddrLit::V6(a), pfx) => {
+                            out.push_str(&alloc::format!(" net6={a:#x}/{pfx:?}"))
+                        }
                         PrimType::Port(p) => out.push_str(&alloc::format!(" port={p}")),
                         PrimType::PortRange(lo, hi) => {
                             out.push_str(&alloc::format!(" portrange={lo}-{hi}"))
