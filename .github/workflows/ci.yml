@@ -82,6 +82,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-features
 
+  # Building for a bare-metal target (no `std` in its sysroot at all) is the only check that really proves
+  # the crate is `no_std` + `alloc`: on a host target an accidental `std::` use would still compile.
+  no_std:
+    name: no_std (thumbv7m-none-eabi)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7m-none-eabi
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --no-default-features --target thumbv7m-none-eabi
+
   docs:
     name: Docs
     runs-on: ubuntu-latest

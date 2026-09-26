@@ -9,7 +9,7 @@ let program = compile("tcp port 80", LinkType::Ethernet, KEEP_WHOLE_PACKET)?;
 println!("{program}");
 ```
 
-```
+```sh
 (000) ldh      [12]
 (001) jeq      #0x800           jt 2	jf 12
 (002) ldb      [23]
