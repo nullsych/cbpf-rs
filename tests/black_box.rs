@@ -258,10 +258,46 @@ fn linux_sll_host_matches_the_address() {
     assert!(!program.matches(&packet));
 }
 
+/// Raw has no link-layer header: the IPv4 header is at byte 0, and (until IPv6 exists) every packet is taken to be IPv4.
 #[test]
-fn raw_link_type_is_rejected_for_now() {
-    let err = compile("tcp port 80", LinkType::Raw, KEEP_WHOLE_PACKET).unwrap_err();
-    assert_eq!(err.tag, ErrorTag::UnsupportedLinkType);
+fn raw_tcp_port_80() {
+    let program = compile("tcp port 80", LinkType::Raw, KEEP_WHOLE_PACKET).unwrap();
+
+    let mut packet = vec![0u8; 28];
+    packet[0] = 0x45; // IPv4, IHL = 5
+    packet[9] = 6; // proto TCP
+    packet[20] = 0x00;
+    packet[21] = 80; // src port 80
+    packet[22] = 0x00;
+    packet[23] = 1; // dst port 1
+    assert!(program.matches(&packet), "src port 80 should match");
+
+    packet[21] = 2;
+    packet[23] = 80;
+    assert!(program.matches(&packet), "dst port 80 should match");
+
+    packet[23] = 81;
+    assert!(!program.matches(&packet), "no port 80 should not match");
+}
+
+#[test]
+fn raw_host_matches_the_address() {
+    let program = compile("ip dst host 10.0.0.1", LinkType::Raw, KEEP_WHOLE_PACKET).unwrap();
+
+    let mut packet = vec![0u8; 20];
+    packet[0] = 0x45;
+    packet[16..20].copy_from_slice(&[10, 0, 0, 1]); // dst address
+    assert!(program.matches(&packet));
+
+    packet[19] = 2;
+    assert!(!program.matches(&packet));
+}
+
+/// `arp` is identified by its ethertype, which a Raw link layer doesn't have.
+#[test]
+fn arp_is_rejected_on_raw() {
+    let err = compile("arp host 10.0.0.1", LinkType::Raw, KEEP_WHOLE_PACKET).unwrap_err();
+    assert!(matches!(err.tag, ErrorTag::InvalidPrimitiveCombination(_)));
 }
 
 /// A deliberately huge OR chain to exercise the jt/jf displacement-overflow path end to end, through the public API.

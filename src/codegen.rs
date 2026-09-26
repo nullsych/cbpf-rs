@@ -41,7 +41,8 @@ const PORT_DST_REL: u32 = 2;
 struct Ctx<'a> {
     b: &'a mut IrBuilder,
     ip_base: u32,
-    eth_field: u32,
+    /// Offset of the ethertype field, or `None` for link types without one (Raw), where the packet is assumed to be IPv4.
+    eth_field: Option<u32>,
 }
 
 /// Control branch for labels.
@@ -61,8 +62,9 @@ impl Branch {
 }
 
 /// Generate main cBPF from desugared expression.
-/// Note: generate() supports [`LinkType::Ethernet`] and [`LinkType::LinuxSll`], i.e. the link types with an ethertype field to gate on.
-/// [`LinkType::Raw`] is rejected with [`ErrorTag::UnsupportedLinkType`] until codegen can compile without that gate.
+/// Note: generate() supports [`LinkType::Ethernet`], [`LinkType::LinuxSll`] and [`LinkType::Raw`].
+/// Raw packets have no ethertype field, so they are assumed to be IPv4 and the ethertype gate is skipped
+/// (until IPv6 is implemented, there is nothing else they could be).
 pub(crate) fn generate(
     expr: &ExpandedExpr,
     link_type: LinkType,
@@ -70,10 +72,6 @@ pub(crate) fn generate(
 ) -> Result<IrProgram, CompileError> {
     // get base and offset
     let info = link_type.l3_offset_info();
-    // link type without such a field (Raw) can't be compiled yet
-    let Some(eth_field) = info.ethertype_offset else {
-        return Err(CompileError::new(0..0, ErrorTag::UnsupportedLinkType));
-    };
 
     // prepare intermediate representation
     let mut builder = IrBuilder::new();
@@ -83,7 +81,7 @@ pub(crate) fn generate(
     let mut ctx = Ctx {
         b: &mut builder,
         ip_base: info.ip_base,
-        eth_field,
+        eth_field: info.ethertype_offset,
     };
 
     // ? in case of IPv6
@@ -299,6 +297,7 @@ fn compile_addr(
 ) -> Result<(), CompileError> {
     let addr_val = ipv4_or_error(addr, &p.offset)?;
     let gates = addr_gates(p.proto, &p.offset)?;
+    ensure_ethertype_available(ctx, &gates, &p.offset)?;
     let offset = p.offset.clone();
     emit_ethertype_and_proto_gates(
         ctx,
@@ -329,6 +328,7 @@ fn compile_addr_pair(
 ) -> Result<(), CompileError> {
     let addr_val = ipv4_or_error(addr, &p1.offset)?;
     let gates = addr_gates(p1.proto, &p1.offset)?;
+    ensure_ethertype_available(ctx, &gates, &p1.offset)?;
     let offset = p1.offset.clone();
     emit_ethertype_and_proto_gates(
         ctx,
@@ -564,6 +564,23 @@ fn emit_port_terminal(
     }
 }
 
+/// `arp`/`rarp` are identified by their ethertype alone, so they can't be expressed on a link type that has none.
+fn ensure_ethertype_available(
+    ctx: &Ctx,
+    gates: &AddrGates,
+    offset: &Offset,
+) -> Result<(), CompileError> {
+    if ctx.eth_field.is_none() && gates.ethertype != ETH_TYPE_IP {
+        return Err(CompileError::new(
+            offset.clone(),
+            ErrorTag::InvalidPrimitiveCombination(
+                "'arp'/'rarp' need a link layer with an ethertype field; this link type has none",
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Emits the ethertype check and, if `ip_proto` is given, the IP-protocol check. Any mismatch
 /// jumps to `on_false`; on success execution falls through to whatever is emitted next.
 fn emit_ethertype_and_proto_gates(
@@ -573,9 +590,11 @@ fn emit_ethertype_and_proto_gates(
     offset: Offset,
     on_false: Label,
 ) {
-    let eth_field = ctx.eth_field;
     let ip_base = ctx.ip_base;
-    gate_ldh_eq(ctx, eth_field, ethertype, offset.clone(), on_false);
+    // No ethertype field (Raw): nothing to check, the packet is taken to be IPv4.
+    if let Some(eth_field) = ctx.eth_field {
+        gate_ldh_eq(ctx, eth_field, ethertype, offset.clone(), on_false);
+    }
     if let Some(proto_num) = ip_proto {
         gate_ldb_eq(ctx, ip_base + IP_PROTO_OFFSET, proto_num, offset, on_false);
     }
@@ -744,13 +763,34 @@ mod tests {
         assert_eq!(render(&program), expected);
     }
 
-    /// Raw has no ethertype field to gate on, so it must be rejected.
+    /// Raw has no link-layer header: no ethertype gate, and every offset is relative to byte 0.
     #[test]
-    fn raw_link_type_is_rejected() {
-        let exp = get_expanded("tcp port 80");
+    fn tcp_port_80_raw() {
+        let program =
+            generate(&get_expanded("tcp port 80"), LinkType::Raw, SNAPLEN).expect("codegen");
+        let expected = "\
+(000) ldb      [9]
+(001) jeq      #0x6  jt 2 jf 10
+(002) ldh      [6]
+(003) jset     #0x1fff  jt 10 jf 4
+(004) ldxb     4*([0]&0xf)
+(005) ldh      [x + 0]
+(006) jeq      #0x50  jt 9 jf 7
+(007) ldh      [x + 2]
+(008) jeq      #0x50  jt 9 jf 10
+(009) ret      #4294967295
+(010) ret      #0
+";
+        assert_eq!(render(&program), expected);
+    }
+
+    /// `arp` is defined by its ethertype, which Raw doesn't have.
+    #[test]
+    fn arp_host_is_rejected_on_raw() {
+        let exp = get_expanded("arp host 10.0.0.1");
         assert!(matches!(
             generate(&exp, LinkType::Raw, SNAPLEN).unwrap_err().tag,
-            ErrorTag::UnsupportedLinkType
+            ErrorTag::InvalidPrimitiveCombination(_)
         ));
     }
 }

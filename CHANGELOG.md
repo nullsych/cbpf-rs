@@ -7,6 +7,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `LinkType::Raw` support in `compile()`: filters can now be compiled for packets that start
+  directly at the IP header (DLT 101). Raw has no ethertype field, so the ethertype gate is
+  skipped and packets are assumed to be IPv4 until IPv6 is implemented.
+
+### Changed
+
+- `compile()` with `LinkType::Raw` now returns a program instead of
+  `ErrorTag::UnsupportedLinkType`, so no link type is rejected any more. `arp`/`rarp` filters on
+  `Raw` return `ErrorTag::InvalidPrimitiveCombination`, since those protocols are identified by
+  their ethertype.
+
 ## [0.1.2] - 2026-09-20
 
 ### Added
