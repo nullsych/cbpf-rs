@@ -31,6 +31,10 @@ const FRAG_MASK: u32 = 0x1fff;
 // 1 hop limit, then the two 16-byte addresses).
 const IP6_SRC_OFFSET: u32 = 8;
 const IP6_DST_OFFSET: u32 = 24;
+/// The byte identifying the header immediately following the fixed IPv6 header (TCP/UDP/SCTP's protocol number, unless an extension header comes first - see `compile_port6`'s doc comment).
+const IP6_NEXTHDR_OFFSET: u32 = 6;
+/// IPv6's base header has a fixed length, unlike IPv4's variable IHL, so a transport header (barring extension headers) always starts exactly here.
+const IP6_HEADER_LEN: u32 = 40;
 
 // ARP packet field offsets, relative to `ip_base` (standard Ethernet/IPv4 ARP: 2 hw-type +
 // 2 proto-type + 1 hw-len + 1 proto-len + 2 opcode = 8, then 6-byte sender hw addr).
@@ -69,8 +73,8 @@ impl Branch {
 
 /// Generate main cBPF from desugared expression.
 /// Note: generate() supports [`LinkType::Ethernet`], [`LinkType::LinuxSll`] and [`LinkType::Raw`].
-/// Raw packets have no ethertype field, so they are assumed to be IPv4 and the ethertype gate is skipped
-/// (until IPv6 is implemented, there is nothing else they could be).
+/// Raw has no ethertype field, so IPv4 and IPv6 are told apart by the header's version nibble instead
+/// (see [`emit_l3_gate`]); ARP/RARP have no such nibble and stay unsupported on Raw.
 pub(crate) fn generate(
     expr: &ExpandedExpr,
     link_type: LinkType,
@@ -331,6 +335,7 @@ fn compile_addr(
     emit_ethertype_and_proto_gates(
         ctx,
         gates.ethertype,
+        IP_PROTO_OFFSET,
         gates.ip_proto,
         offset.clone(),
         branch.on_false,
@@ -365,6 +370,7 @@ fn compile_addr_pair(
     emit_ethertype_and_proto_gates(
         ctx,
         gates.ethertype,
+        IP_PROTO_OFFSET,
         gates.ip_proto,
         offset.clone(),
         branch.on_false,
@@ -418,7 +424,14 @@ fn compile_addr6(
         dst_offset: IP6_DST_OFFSET,
     };
     ensure_ethertype_available(ctx, &gates, &offset)?;
-    emit_ethertype_and_proto_gates(ctx, gates.ethertype, None, offset.clone(), branch.on_false);
+    emit_ethertype_and_proto_gates(
+        ctx,
+        gates.ethertype,
+        IP6_NEXTHDR_OFFSET,
+        None,
+        offset.clone(),
+        branch.on_false,
+    );
 
     let prefix = u32::from(prefix.unwrap_or(128));
     match second {
@@ -550,9 +563,9 @@ fn port_proto_num(proto: CompiledProto, offset: &Offset) -> Result<u32, CompileE
     }
 }
 
-/// Compiles a `port`/`portrange` primitive over the inclusive range `lo..=hi`: ethertype and
-/// protocol gates, the not-a-later-fragment gate, loading the IP header length into `X`, then the
-/// port comparison.
+/// Compiles a `port`/`portrange` primitive over the inclusive range `lo..=hi`, trying IPv4 first and, on failure, IPv6 -
+/// mirroring how real libpcap compiles `tcp`/`udp`/`port` into a program that also matches IPv6 traffic, even though the
+/// filter text never mentions IPv6.
 fn compile_port(
     p: &CompiledPrimitive,
     ctx: &mut Ctx,
@@ -562,22 +575,26 @@ fn compile_port(
 ) -> Result<(), CompileError> {
     let proto_num = port_proto_num(p.proto, &p.offset)?;
     let offset = p.offset.clone();
-    emit_ethertype_and_proto_gates(
+    let try_v6 = ctx.b.new_label();
+    compile_port4(
         ctx,
-        ETH_TYPE_IP,
-        Some(proto_num),
+        proto_num,
+        p.dir,
+        lo,
+        hi,
         offset.clone(),
-        branch.on_false,
+        Branch {
+            on_true: branch.on_true,
+            on_false: try_v6,
+        },
     );
-    emit_not_fragment_gate(ctx, offset.clone(), branch.on_false);
-    let ip_base = ctx.ip_base;
-    ctx.b.emit(IrOp2::LdxMsh(ip_base), offset.clone());
-    emit_port_terminal(ctx, p.dir, lo, hi, offset, branch);
+    ctx.b.place(try_v6);
+    compile_port6(ctx, proto_num, p.dir, lo, hi, offset, branch);
     Ok(())
 }
 
-/// Like [`compile_port`], but for a `src`/`dst` pair: the prologue (gates, fragment check,
-/// `ldx_msh`) is emitted once, then `p1`'s direction is checked and, if it fails, `p2`'s.
+/// Like [`compile_port`], but for a `src`/`dst` pair: within each of the IPv4 and IPv6 attempts, the prologue is emitted
+/// once, then `p1`'s direction is checked and, if it fails, `p2`'s.
 fn compile_port_pair(
     p1: &CompiledPrimitive,
     p2: &CompiledPrimitive,
@@ -588,9 +605,65 @@ fn compile_port_pair(
 ) -> Result<(), CompileError> {
     let proto_num = port_proto_num(p1.proto, &p1.offset)?;
     let offset = p1.offset.clone();
+    let try_v6 = ctx.b.new_label();
+    compile_port4_pair(
+        ctx,
+        proto_num,
+        (p1.dir, p2.dir),
+        lo,
+        hi,
+        offset.clone(),
+        Branch {
+            on_true: branch.on_true,
+            on_false: try_v6,
+        },
+    );
+    ctx.b.place(try_v6);
+    compile_port6_pair(ctx, proto_num, (p1.dir, p2.dir), lo, hi, offset, branch);
+    Ok(())
+}
+
+/// The IPv4 side of a `port`/`portrange` check: ethertype/protocol gates, the not-a-later-fragment gate, the variable IP
+/// header length loaded into `X`, then the port comparison.
+fn compile_port4(
+    ctx: &mut Ctx,
+    proto_num: u32,
+    dir: DirTag,
+    lo: u16,
+    hi: u16,
+    offset: Offset,
+    branch: Branch,
+) {
     emit_ethertype_and_proto_gates(
         ctx,
         ETH_TYPE_IP,
+        IP_PROTO_OFFSET,
+        Some(proto_num),
+        offset.clone(),
+        branch.on_false,
+    );
+    emit_not_fragment_gate(ctx, offset.clone(), branch.on_false);
+    let ip_base = ctx.ip_base;
+    ctx.b.emit(IrOp2::LdxMsh(ip_base), offset.clone());
+    emit_port_terminal(ctx, dir, lo, hi, offset, branch);
+}
+
+/// [`compile_port4`] for a `src`/`dst` pair: the prologue (gates, fragment check, `ldx_msh`) is emitted once, then
+/// `dir1` is checked and, if it fails, `dir2`.
+fn compile_port4_pair(
+    ctx: &mut Ctx,
+    proto_num: u32,
+    dirs: (DirTag, DirTag),
+    lo: u16,
+    hi: u16,
+    offset: Offset,
+    branch: Branch,
+) {
+    let (dir1, dir2) = dirs;
+    emit_ethertype_and_proto_gates(
+        ctx,
+        ETH_TYPE_IP,
+        IP_PROTO_OFFSET,
         Some(proto_num),
         offset.clone(),
         branch.on_false,
@@ -602,7 +675,7 @@ fn compile_port_pair(
     let mid = ctx.b.new_label();
     emit_port_terminal(
         ctx,
-        p1.dir,
+        dir1,
         lo,
         hi,
         offset.clone(),
@@ -612,13 +685,76 @@ fn compile_port_pair(
         },
     );
     ctx.b.place(mid);
-    emit_port_terminal(ctx, p2.dir, lo, hi, offset, branch);
-    Ok(())
+    emit_port_terminal(ctx, dir2, lo, hi, offset, branch);
+}
+
+/// The IPv6 side of a `port`/`portrange` check: ethertype/version gate, then a check that the header's immediate
+/// next-header byte is `proto_num`, then the port comparison at IPv6's fixed 40-byte header length (no `ldx_msh`: unlike
+/// IPv4, the base IPv6 header carries no options).
+///
+/// No fragment gate is needed either: a packet with a Fragment extension header between IPv6 and the transport header has
+/// some other value at the next-header offset (44, not `proto_num`), so the check above already excludes it. This crate
+/// does not walk the IPv6 extension header chain - matching how real libpcap's own generated code behaves, not a bug here
+/// (confirmed against `tcpdump -d`; see `tests/differential.rs`).
+fn compile_port6(
+    ctx: &mut Ctx,
+    proto_num: u32,
+    dir: DirTag,
+    lo: u16,
+    hi: u16,
+    offset: Offset,
+    branch: Branch,
+) {
+    emit_ethertype_and_proto_gates(
+        ctx,
+        ETH_TYPE_IPV6,
+        IP6_NEXTHDR_OFFSET,
+        Some(proto_num),
+        offset.clone(),
+        branch.on_false,
+    );
+    emit_port6_terminal(ctx, dir, lo, hi, offset, branch);
+}
+
+/// [`compile_port6`] for a `src`/`dst` pair: the prologue is emitted once, then `dir1` is checked and, if it fails,
+/// `dir2`.
+fn compile_port6_pair(
+    ctx: &mut Ctx,
+    proto_num: u32,
+    dirs: (DirTag, DirTag),
+    lo: u16,
+    hi: u16,
+    offset: Offset,
+    branch: Branch,
+) {
+    let (dir1, dir2) = dirs;
+    emit_ethertype_and_proto_gates(
+        ctx,
+        ETH_TYPE_IPV6,
+        IP6_NEXTHDR_OFFSET,
+        Some(proto_num),
+        offset.clone(),
+        branch.on_false,
+    );
+    let mid = ctx.b.new_label();
+    emit_port6_terminal(
+        ctx,
+        dir1,
+        lo,
+        hi,
+        offset.clone(),
+        Branch {
+            on_true: branch.on_true,
+            on_false: mid,
+        },
+    );
+    ctx.b.place(mid);
+    emit_port6_terminal(ctx, dir2, lo, hi, offset, branch);
 }
 
 /// Ports only exist in a packet's first fragment; libpcap always guards port checks against later
 /// fragments carrying no transport header, and so do we - skipping this is the classic way to
-/// diverge from the oracle only on fragmented traffic.
+/// diverge from the oracle only on fragmented traffic. IPv4 only: see [`compile_port6`] for why IPv6 needs no equivalent.
 fn emit_not_fragment_gate(ctx: &mut Ctx, offset: Offset, on_false: Label) {
     let ip_base = ctx.ip_base;
     ctx.b.emit(
@@ -637,29 +773,9 @@ fn emit_not_fragment_gate(ctx: &mut Ctx, offset: Offset, on_false: Label) {
     ctx.b.place(not_fragment);
 }
 
-/// Loads the src/dst port and compares it, assuming `X` already holds the IPv4 header length (from a
-/// preceding `ldx_msh(ip_base)`).
-///
-/// `k = ip_base + {PORT_SRC_REL,PORT_DST_REL}` here, not an offset from the TCP/UDP header's own
-/// start: `X` (set by `ldx_msh`) holds only the *header length* (e.g. 20), not the header length
-/// plus `ip_base`, so `ip_base` has to be folded into this instruction's `k` instead - which is
-/// exactly what makes this indirect load's `k` operand, not `X` itself, the thing a future `vlan`
-/// primitive would need to shift by 4.
-fn emit_port_terminal(
-    ctx: &mut Ctx,
-    dir: DirTag,
-    lo: u16,
-    hi: u16,
-    offset: Offset,
-    branch: Branch,
-) {
-    let port_rel = match dir {
-        DirTag::Src => PORT_SRC_REL,
-        DirTag::Dst => PORT_DST_REL,
-    };
-    let ip_base = ctx.ip_base;
-    ctx.b
-        .emit(IrOp2::LdhInd(ip_base + port_rel), offset.clone());
+/// Compares an already-loaded 16-bit port value (in `A`) against the inclusive range `lo..=hi`. Shared by the IPv4 and
+/// IPv6 terminals, which differ only in how they load that value.
+fn emit_port_compare(ctx: &mut Ctx, lo: u16, hi: u16, offset: Offset, branch: Branch) {
     if lo == hi {
         ctx.b.emit(
             IrOp2::Jeq {
@@ -693,40 +809,138 @@ fn emit_port_terminal(
     }
 }
 
-/// `arp`/`rarp`/`ip6` are identified by their ethertype alone, so they can't be expressed on a link type that has none.
+/// Loads the src/dst port and compares it, assuming `X` already holds the IPv4 header length (from a
+/// preceding `ldx_msh(ip_base)`).
+///
+/// `k = ip_base + {PORT_SRC_REL,PORT_DST_REL}` here, not an offset from the TCP/UDP header's own
+/// start: `X` (set by `ldx_msh`) holds only the *header length* (e.g. 20), not the header length
+/// plus `ip_base`, so `ip_base` has to be folded into this instruction's `k` instead - which is
+/// exactly what makes this indirect load's `k` operand, not `X` itself, the thing a future `vlan`
+/// primitive would need to shift by 4.
+fn emit_port_terminal(
+    ctx: &mut Ctx,
+    dir: DirTag,
+    lo: u16,
+    hi: u16,
+    offset: Offset,
+    branch: Branch,
+) {
+    let port_rel = match dir {
+        DirTag::Src => PORT_SRC_REL,
+        DirTag::Dst => PORT_DST_REL,
+    };
+    let ip_base = ctx.ip_base;
+    ctx.b
+        .emit(IrOp2::LdhInd(ip_base + port_rel), offset.clone());
+    emit_port_compare(ctx, lo, hi, offset, branch);
+}
+
+/// The IPv6 counterpart of [`emit_port_terminal`]: since IPv6's base header has a fixed length, the port is loaded with a
+/// plain absolute offset (`ip_base + IP6_HEADER_LEN + port_rel`) instead of the indirect `X`-relative load IPv4 needs for
+/// its variable header length.
+fn emit_port6_terminal(
+    ctx: &mut Ctx,
+    dir: DirTag,
+    lo: u16,
+    hi: u16,
+    offset: Offset,
+    branch: Branch,
+) {
+    let port_rel = match dir {
+        DirTag::Src => PORT_SRC_REL,
+        DirTag::Dst => PORT_DST_REL,
+    };
+    let ip_base = ctx.ip_base;
+    ctx.b.emit(
+        IrOp2::LdhAbs(ip_base + IP6_HEADER_LEN + port_rel),
+        offset.clone(),
+    );
+    emit_port_compare(ctx, lo, hi, offset, branch);
+}
+
+/// `arp`/`rarp` are identified by their ethertype alone, with no equivalent in the IP header itself (unlike IPv4 vs IPv6,
+/// which [`emit_l3_gate`] can tell apart from the version nibble even without an ethertype field), so they can't be
+/// expressed on a link type that has none.
 fn ensure_ethertype_available(
     ctx: &Ctx,
     gates: &AddrGates,
     offset: &Offset,
 ) -> Result<(), CompileError> {
-    if ctx.eth_field.is_none() && gates.ethertype != ETH_TYPE_IP {
+    let needs_ethertype = matches!(gates.ethertype, ETH_TYPE_ARP | ETH_TYPE_RARP);
+    if ctx.eth_field.is_none() && needs_ethertype {
         return Err(CompileError::new(
             offset.clone(),
             ErrorTag::InvalidPrimitiveCombination(
-                "'arp'/'rarp'/'ip6' need a link layer with an ethertype field; this link type has none",
+                "'arp'/'rarp' need a link layer with an ethertype field; this link type has none",
             ),
         ));
     }
     Ok(())
 }
 
-/// Emits the ethertype check and, if `ip_proto` is given, the IP-protocol check. Any mismatch
-/// jumps to `on_false`; on success execution falls through to whatever is emitted next.
+/// Emits the ethertype/version check (see [`emit_l3_gate`]) and, if `ip_proto` is given, a check that the byte at
+/// `ip_base + proto_field_offset` equals it: IPv4's protocol field ([`IP_PROTO_OFFSET`]) or IPv6's immediate next-header
+/// field ([`IP6_NEXTHDR_OFFSET`]). Any mismatch jumps to `on_false`; on success execution falls through to whatever is
+/// emitted next.
 fn emit_ethertype_and_proto_gates(
     ctx: &mut Ctx,
     ethertype: u32,
+    proto_field_offset: u32,
     ip_proto: Option<u32>,
     offset: Offset,
     on_false: Label,
 ) {
     let ip_base = ctx.ip_base;
-    // No ethertype field (Raw): nothing to check, the packet is taken to be IPv4.
-    if let Some(eth_field) = ctx.eth_field {
-        gate_ldh_eq(ctx, eth_field, ethertype, offset.clone(), on_false);
-    }
+    emit_l3_gate(ctx, ethertype, offset.clone(), on_false);
     if let Some(proto_num) = ip_proto {
-        gate_ldb_eq(ctx, ip_base + IP_PROTO_OFFSET, proto_num, offset, on_false);
+        gate_ldb_eq(
+            ctx,
+            ip_base + proto_field_offset,
+            proto_num,
+            offset,
+            on_false,
+        );
     }
+}
+
+/// Tells this packet's network-layer protocol apart from whatever else shares its link layer: an ethertype check when the
+/// link type has one (Ethernet, LinuxSll), or - on [`LinkType::Raw`], which has no ethertype field - the header's version
+/// nibble (byte 0's high nibble: `0x4` for IPv4, `0x6` for IPv6; see [`gate_ip_version`]). ARP/RARP have no version
+/// nibble of their own and must be rejected by the caller before reaching here on Raw (see
+/// [`ensure_ethertype_available`]); every caller that can reach this function with `ctx.eth_field` absent only ever
+/// passes [`ETH_TYPE_IP`] or [`ETH_TYPE_IPV6`].
+fn emit_l3_gate(ctx: &mut Ctx, ethertype: u32, offset: Offset, on_false: Label) {
+    match ctx.eth_field {
+        Some(eth_field) => gate_ldh_eq(ctx, eth_field, ethertype, offset, on_false),
+        None => {
+            let version_nibble = match ethertype {
+                ETH_TYPE_IP => 0x40,
+                ETH_TYPE_IPV6 => 0x60,
+                _ => unreachable!(
+                    "Raw has no ARP/RARP gate; callers must reject those via ensure_ethertype_available first"
+                ),
+            };
+            gate_ip_version(ctx, version_nibble, offset, on_false);
+        }
+    }
+}
+
+/// Raw-only version-nibble check: `ldb [ip_base]; and #0xf0; jeq version_nibble`. `version_nibble` is the IP version
+/// already shifted into the byte's high nibble (`0x40` for IPv4, `0x60` for IPv6).
+fn gate_ip_version(ctx: &mut Ctx, version_nibble: u32, offset: Offset, on_false: Label) {
+    let ip_base = ctx.ip_base;
+    ctx.b.emit(IrOp2::LdbAbs(ip_base), offset.clone());
+    ctx.b.emit(IrOp2::AndK(0xf0), offset.clone());
+    let cont = ctx.b.new_label();
+    ctx.b.emit(
+        IrOp2::Jeq {
+            imm: version_nibble,
+            jt: cont,
+            jf: on_false,
+        },
+        offset,
+    );
+    ctx.b.place(cont);
 }
 
 /// Emits `load; jeq imm, <continue>, on_false` and places `<continue>` immediately, so whatever the
@@ -846,25 +1060,35 @@ mod tests {
         out
     }
 
-    /// The canonical filter, pinned instruction for instruction. Any change to lowering,
-    /// gate order or sharing shows up here as a readable diff instead of a silent behaviour
-    /// change and this listing is ~comparable to `tcpdump -d 'tcp port 80'` (if IPv4 only).
+    /// The canonical filter, pinned instruction for instruction: the IPv4 attempt (0-10) exactly as before, falling
+    /// through to an IPv6 attempt (11-18) on any IPv4 gate failure - matching real libpcap's behavior of also matching
+    /// IPv6 traffic for a filter that never mentions IPv6 (confirmed against `tcpdump -d`, modulo instruction order -
+    /// see the module's black-box/differential tests for why this crate's own listing isn't byte-identical to
+    /// `tcpdump -d`'s).
     #[test]
     fn tcp_port_80() {
         let expected = "\
 (000) ldh      [12]
-(001) jeq      #0x800  jt 2 jf 12
+(001) jeq      #0x800  jt 2 jf 11
 (002) ldb      [23]
-(003) jeq      #0x6  jt 4 jf 12
+(003) jeq      #0x6  jt 4 jf 11
 (004) ldh      [20]
-(005) jset     #0x1fff  jt 12 jf 6
+(005) jset     #0x1fff  jt 11 jf 6
 (006) ldxb     4*([14]&0xf)
 (007) ldh      [x + 14]
-(008) jeq      #0x50  jt 11 jf 9
+(008) jeq      #0x50  jt 19 jf 9
 (009) ldh      [x + 16]
-(010) jeq      #0x50  jt 11 jf 12
-(011) ret      #4294967295
-(012) ret      #0
+(010) jeq      #0x50  jt 19 jf 11
+(011) ldh      [12]
+(012) jeq      #0x86dd  jt 13 jf 20
+(013) ldb      [20]
+(014) jeq      #0x6  jt 15 jf 20
+(015) ldh      [54]
+(016) jeq      #0x50  jt 19 jf 17
+(017) ldh      [56]
+(018) jeq      #0x50  jt 19 jf 20
+(019) ret      #4294967295
+(020) ret      #0
 ";
         assert_eq!(render(&get_gen("tcp port 80")), expected);
     }
@@ -876,39 +1100,60 @@ mod tests {
             generate(&get_expanded("tcp port 80"), LinkType::LinuxSll, SNAPLEN).expect("codegen");
         let expected = "\
 (000) ldh      [14]
-(001) jeq      #0x800  jt 2 jf 12
+(001) jeq      #0x800  jt 2 jf 11
 (002) ldb      [25]
-(003) jeq      #0x6  jt 4 jf 12
+(003) jeq      #0x6  jt 4 jf 11
 (004) ldh      [22]
-(005) jset     #0x1fff  jt 12 jf 6
+(005) jset     #0x1fff  jt 11 jf 6
 (006) ldxb     4*([16]&0xf)
 (007) ldh      [x + 16]
-(008) jeq      #0x50  jt 11 jf 9
+(008) jeq      #0x50  jt 19 jf 9
 (009) ldh      [x + 18]
-(010) jeq      #0x50  jt 11 jf 12
-(011) ret      #4294967295
-(012) ret      #0
+(010) jeq      #0x50  jt 19 jf 11
+(011) ldh      [14]
+(012) jeq      #0x86dd  jt 13 jf 20
+(013) ldb      [22]
+(014) jeq      #0x6  jt 15 jf 20
+(015) ldh      [56]
+(016) jeq      #0x50  jt 19 jf 17
+(017) ldh      [58]
+(018) jeq      #0x50  jt 19 jf 20
+(019) ret      #4294967295
+(020) ret      #0
 ";
         assert_eq!(render(&program), expected);
     }
 
-    /// Raw has no link-layer header: no ethertype gate, and every offset is relative to byte 0.
+    /// Raw has no link-layer header, so IPv4 vs IPv6 is told apart by the version nibble (0-2) instead of an
+    /// ethertype, and every offset is relative to byte 0.
     #[test]
     fn tcp_port_80_raw() {
         let program =
             generate(&get_expanded("tcp port 80"), LinkType::Raw, SNAPLEN).expect("codegen");
         let expected = "\
-(000) ldb      [9]
-(001) jeq      #0x6  jt 2 jf 10
-(002) ldh      [6]
-(003) jset     #0x1fff  jt 10 jf 4
-(004) ldxb     4*([0]&0xf)
-(005) ldh      [x + 0]
-(006) jeq      #0x50  jt 9 jf 7
-(007) ldh      [x + 2]
-(008) jeq      #0x50  jt 9 jf 10
-(009) ret      #4294967295
-(010) ret      #0
+(000) ldb      [0]
+(001) and      #0xf0
+(002) jeq      #0x40  jt 3 jf 12
+(003) ldb      [9]
+(004) jeq      #0x6  jt 5 jf 12
+(005) ldh      [6]
+(006) jset     #0x1fff  jt 12 jf 7
+(007) ldxb     4*([0]&0xf)
+(008) ldh      [x + 0]
+(009) jeq      #0x50  jt 21 jf 10
+(010) ldh      [x + 2]
+(011) jeq      #0x50  jt 21 jf 12
+(012) ldb      [0]
+(013) and      #0xf0
+(014) jeq      #0x60  jt 15 jf 22
+(015) ldb      [6]
+(016) jeq      #0x6  jt 17 jf 22
+(017) ldh      [40]
+(018) jeq      #0x50  jt 21 jf 19
+(019) ldh      [42]
+(020) jeq      #0x50  jt 21 jf 22
+(021) ret      #4294967295
+(022) ret      #0
 ";
         assert_eq!(render(&program), expected);
     }
@@ -1039,10 +1284,33 @@ mod tests {
         ));
     }
 
-    /// Raw has no ethertype to tell IPv6 from IPv4 with, so an `ip6` primitive can't be compiled for it yet.
+    /// Raw has no ethertype, but `ip6 host` still compiles there: IPv4 vs IPv6 is told apart by the version nibble.
     #[test]
-    fn ip6_is_rejected_on_raw() {
-        let exp = get_expanded("ip6 host ::1");
+    fn ip6_host_on_raw_uses_the_version_nibble() {
+        let program =
+            generate(&get_expanded("ip6 dst host ::1"), LinkType::Raw, SNAPLEN).expect("codegen");
+        let expected = "\
+(000) ldb      [0]
+(001) and      #0xf0
+(002) jeq      #0x60  jt 3 jf 12
+(003) ld       [24]
+(004) jeq      #0x0  jt 5 jf 12
+(005) ld       [28]
+(006) jeq      #0x0  jt 7 jf 12
+(007) ld       [32]
+(008) jeq      #0x0  jt 9 jf 12
+(009) ld       [36]
+(010) jeq      #0x1  jt 11 jf 12
+(011) ret      #4294967295
+(012) ret      #0
+";
+        assert_eq!(render(&program), expected);
+    }
+
+    /// `arp`/`rarp` still have no way to be identified on Raw: no ethertype, and no version-nibble equivalent either.
+    #[test]
+    fn arp_and_rarp_are_still_rejected_on_raw() {
+        let exp = get_expanded("arp host 10.0.0.1");
         assert!(matches!(
             generate(&exp, LinkType::Raw, SNAPLEN).unwrap_err().tag,
             ErrorTag::InvalidPrimitiveCombination(_)

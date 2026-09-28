@@ -26,20 +26,30 @@ fn tcp_port_80_simple() {
     let program: cbpf_rs::Program =
         compile("tcp port 80", LinkType::Ethernet, KEEP_WHOLE_PACKET).unwrap();
     let rendered = program.to_string();
+    // The IPv4 attempt (0-10) exactly as before, falling through to an IPv6 attempt (11-18) on any IPv4 gate failure -
+    // matching real libpcap's behavior of also matching IPv6 traffic for a filter that never mentions IPv6.
     let expected = "\
 (000) ldh      [12]
-(001) jeq      #0x800           jt 2\tjf 12
+(001) jeq      #0x800           jt 2\tjf 11
 (002) ldb      [23]
-(003) jeq      #0x6             jt 4\tjf 12
+(003) jeq      #0x6             jt 4\tjf 11
 (004) ldh      [20]
-(005) jset     #0x1fff          jt 12\tjf 6
+(005) jset     #0x1fff          jt 11\tjf 6
 (006) ldxb     4*([14]&0xf)
 (007) ldh      [x + 14]
-(008) jeq      #0x50            jt 11\tjf 9
+(008) jeq      #0x50            jt 19\tjf 9
 (009) ldh      [x + 16]
-(010) jeq      #0x50            jt 11\tjf 12
-(011) ret      #0xffffffff
-(012) ret      #0x0";
+(010) jeq      #0x50            jt 19\tjf 11
+(011) ldh      [12]
+(012) jeq      #0x86dd          jt 13\tjf 20
+(013) ldb      [20]
+(014) jeq      #0x6             jt 15\tjf 20
+(015) ldh      [54]
+(016) jeq      #0x50            jt 19\tjf 17
+(017) ldh      [56]
+(018) jeq      #0x50            jt 19\tjf 20
+(019) ret      #0xffffffff
+(020) ret      #0x0";
     assert_eq!(rendered, expected);
 }
 
@@ -408,9 +418,28 @@ fn ipv6_address_with_an_ipv4_protocol_is_rejected() {
     }
 }
 
-/// Raw has no ethertype to tell IPv6 from IPv4 with, so `ip6` primitives are rejected there for now.
+/// Raw has no ethertype, but `ip6 host` still compiles there: IPv4 vs IPv6 is told apart by the header's version nibble.
 #[test]
-fn ip6_is_rejected_on_raw() {
-    let err = compile("ip6 host ::1", LinkType::Raw, KEEP_WHOLE_PACKET).unwrap_err();
+fn ip6_host_matches_on_raw() {
+    let program = compile("ip6 host ::1", LinkType::Raw, KEEP_WHOLE_PACKET).unwrap();
+
+    let mut packet = vec![0u8; 40];
+    packet[0] = 0x60; // version 6
+    packet[6] = 58; // next header (unused by host/net, but a realistic value)
+    packet[23] = 1; // src ::1
+    assert!(program.matches(&packet), "src ::1 should match");
+
+    // The same trailing byte on an IPv4-shaped packet (version nibble 4) must not match: the address fields don't even
+    // line up between the two (IPv6 addresses start at byte 8, IPv4's at byte 12/16).
+    let mut v4_packet = vec![0u8; 20];
+    v4_packet[0] = 0x45;
+    v4_packet[19] = 1;
+    assert!(!program.matches(&v4_packet));
+}
+
+/// `arp`/`rarp` still have no way to be identified on Raw: no ethertype, and no version-nibble equivalent either.
+#[test]
+fn arp_is_still_rejected_on_raw() {
+    let err = compile("arp host 10.0.0.1", LinkType::Raw, KEEP_WHOLE_PACKET).unwrap_err();
     assert!(matches!(err.tag, ErrorTag::InvalidPrimitiveCombination(_)));
 }

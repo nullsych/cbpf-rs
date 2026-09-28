@@ -16,12 +16,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   past the prefix are not read. The generated code matches `tcpdump -d` for `ip6 host`.
 - `ErrorTag::InvalidIPv6Literal`, returned for text that is not a valid IPv6 address or prefix.
 - Differential tests against `tcpdump` for IPv6 addresses and prefix lengths.
+- `tcp`/`udp`/`portrange` primitives now also match IPv6 traffic, the way real libpcap's own
+  generated code does: a filter like `tcp port 80` never has to mention IPv6 to match it. The
+  IPv6 side checks the header's immediate next-header field rather than walking the extension
+  header chain (matching libpcap's own behavior), so a packet with an intervening extension
+  header (e.g. a Fragment header) is never matched, first fragment included.
+- `LinkType::Raw` (no ethertype field) now tells IPv4 and IPv6 apart using the header's version
+  nibble, so `ip6 host`/`net` and IPv6-matching `port`/`portrange` filters compile there too, and
+  `ip`/`port` filters no longer accidentally match a stray IPv6 packet.
 
 ### Changed
 
 - IPv6 address literals are no longer reported as `ErrorTag::Unimplemented`; they are compiled.
   An IPv6 address combined with an IPv4-only protocol (`ip host ::1`, `tcp host ::1`) or an IPv4
-  address with `ip6` is an `ErrorTag::InvalidPrimitiveCombination`, as is `ip6` on `LinkType::Raw`.
+  address with `ip6` is an `ErrorTag::InvalidPrimitiveCombination`. `arp`/`rarp` are still rejected
+  on `LinkType::Raw`: unlike IPv4/IPv6, they have no version-nibble equivalent to gate on.
+- The bytecode generated for `tcp`/`udp`/`portrange` primitives (including on `LinkType::Raw`) has
+  changed shape to add the IPv6 branch and, on Raw, the version-nibble gate; `Program::matches`
+  behavior for actual IPv4 traffic is unchanged (see `tests/differential.rs`).
 
 ## [0.1.3] - 2026-09-26
 

@@ -150,6 +150,17 @@ impl Pkt6 {
         self.0[38..54].copy_from_slice(&a.parse::<std::net::Ipv6Addr>().unwrap().octets());
         self
     }
+
+    fn next_header(mut self, proto: u8) -> Self {
+        self.0[20] = proto;
+        self
+    }
+
+    fn ports(mut self, src: u16, dst: u16) -> Self {
+        self.0[54..56].copy_from_slice(&src.to_be_bytes());
+        self.0[56..58].copy_from_slice(&dst.to_be_bytes());
+        self
+    }
 }
 
 const TCP: u8 = 6;
@@ -317,4 +328,30 @@ fn ipv6_filters_never_match_ipv4_packets_and_vice_versa() {
     assert_agrees("ip host 10.0.0.1", &v6.0, "IPv6 packet, ip filter");
     assert_agrees("net ::/0", &v4.0, "::/0 on an IPv4 packet");
     assert_agrees("net ::/0", &v6.0, "::/0 on an IPv6 packet");
+}
+
+/// The headline "level 2" case: a filter that never mentions IPv6 (`tcp port 80`) must still match IPv6 traffic, the same
+/// way real libpcap's generated code does (it compiles a parallel ethertype-0x86dd branch even here).
+#[test]
+fn tcp_port_80_agrees_with_tcpdump_on_ipv6_packets_too() {
+    let matching = Pkt6::new()
+        .next_header(TCP)
+        .src_addr("2001:db8::1")
+        .dst_addr("2001:db8::2")
+        .ports(4000, 80);
+    assert_agrees("tcp port 80", &matching.0, "IPv6, dst port 80");
+
+    let no_port_match = Pkt6::new()
+        .next_header(TCP)
+        .src_addr("2001:db8::1")
+        .dst_addr("2001:db8::2")
+        .ports(4000, 81);
+    assert_agrees("tcp port 80", &no_port_match.0, "IPv6, neither port is 80");
+
+    let wrong_proto = Pkt6::new()
+        .next_header(UDP)
+        .src_addr("2001:db8::1")
+        .dst_addr("2001:db8::2")
+        .ports(4000, 80);
+    assert_agrees("tcp port 80", &wrong_proto.0, "IPv6 UDP, not TCP");
 }
