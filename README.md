@@ -56,6 +56,14 @@ $ cargo run --quiet --example cbpf_dump -- 'tcp port 80'
 (012) ret      #0x0
 ```
 
+## Differential testing against the real kernel
+
+[kernel_diff](examples/kernel_diff.rs) is a standalone, **root-required** tool, separate from `cargo test`: it attaches this crate's compiled program and libpcap's own compiled program (via `tcpdump -ddd`, no libpcap FFI needed) to two `AF_PACKET` sockets on `lo`, injects a battery of hand-built frames, and compares which one the real Linux kernel classic-BPF engine let through - not `cbpf-rs`'s own interpreter and not libpcap's userspace one. It needs Linux, `tcpdump` on `PATH`, and `CAP_NET_RAW` (opening a raw packet socket), so run it explicitly:
+
+```sh
+sudo -E $(which cargo) run --example kernel_diff --features attach
+```
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.

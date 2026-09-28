@@ -22,3 +22,10 @@ attach = ["dep:libc", "std"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { version = "0.2", optional = true }
+
+# Standalone, root-required tool (see the module doc comment in examples/kernel_diff.rs) - not run by
+# `cargo test`, and `required-features` keeps a plain `cargo build`/`cargo test` (no `--features attach`)
+# from trying to compile it at all.
+[[example]]
+name = "kernel_diff"
+required-features = ["attach"]

@@ -24,6 +24,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `LinkType::Raw` (no ethertype field) now tells IPv4 and IPv6 apart using the header's version
   nibble, so `ip6 host`/`net` and IPv6-matching `port`/`portrange` filters compile there too, and
   `ip`/`port` filters no longer accidentally match a stray IPv6 packet.
+- `examples/kernel_diff.rs`: a standalone, root-required tool (not run by `cargo test`) that attaches
+  this crate's compiled program and libpcap's own (via `tcpdump -ddd`) to two `AF_PACKET` sockets on
+  `lo`, injects hand-built frames, and compares which one the real Linux kernel classic-BPF engine let
+  through - a cross-check beyond `tests/differential.rs`, which never leaves userspace.
 
 ### Changed
 
