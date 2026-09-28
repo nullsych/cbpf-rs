@@ -7,6 +7,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- IPv6 `host` and `net` primitives: `ip6 [src|dst] host <addr>`, `ip6 [src|dst] net <addr>/<0..=128>`,
+  and the bare `host`/`net` forms with an IPv6 address (which mean `ip6`, not `ip or arp or rarp`).
+  Addresses accept the usual textual forms (`::`, compressed zeros, `::ffff:1.2.3.4`). The address
+  is compared as four 32-bit words; a prefix ending inside a word masks that word and the words
+  past the prefix are not read. The generated code matches `tcpdump -d` for `ip6 host`.
+- `ErrorTag::InvalidIPv6Literal`, returned for text that is not a valid IPv6 address or prefix.
+- Differential tests against `tcpdump` for IPv6 addresses and prefix lengths.
+
+### Changed
+
+- IPv6 address literals are no longer reported as `ErrorTag::Unimplemented`; they are compiled.
+  An IPv6 address combined with an IPv4-only protocol (`ip host ::1`, `tcp host ::1`) or an IPv4
+  address with `ip6` is an `ErrorTag::InvalidPrimitiveCombination`, as is `ip6` on `LinkType::Raw`.
+
 ## [0.1.3] - 2026-09-26
 
 ### Added

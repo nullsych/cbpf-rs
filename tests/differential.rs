@@ -287,9 +287,17 @@ fn ipv6_net_prefixes_agree_with_tcpdump() {
         "2001:db8:ffff:ffff:ffff:ffff:ffff:ffff",
         "::1",
     ];
+    let base = u128::from("2001:db8::".parse::<std::net::Ipv6Addr>().unwrap());
     // Prefix lengths that end on a word boundary, one bit into a word, one bit short of the next, and the extremes.
-    for prefix in [0, 1, 31, 32, 33, 47, 48, 63, 64, 65, 96, 127, 128] {
-        let filter = format!("ip6 src net 2001:db8::/{prefix}");
+    for prefix in [0u32, 1, 31, 32, 33, 47, 48, 63, 64, 65, 96, 127, 128] {
+        // libpcap rejects a network address with bits set past the prefix ("non-network bits set"), so mask it first.
+        let mask = if prefix == 0 {
+            0
+        } else {
+            u128::MAX << (128 - prefix)
+        };
+        let network = std::net::Ipv6Addr::from(base & mask);
+        let filter = format!("ip6 src net {network}/{prefix}");
         for a in addrs {
             assert_agrees(
                 &filter,
@@ -298,12 +306,6 @@ fn ipv6_net_prefixes_agree_with_tcpdump() {
             );
         }
     }
-    // The address is masked before comparing, so host bits set in the filter's address are ignored, as in libpcap.
-    assert_agrees(
-        "ip6 src net 2001:db8:0:ff::/32",
-        &Pkt6::new().src_addr("2001:db8::7").0,
-        "host bits in the filter address",
-    );
 }
 
 #[test]
