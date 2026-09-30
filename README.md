@@ -11,18 +11,26 @@ println!("{program}");
 
 ```sh
 (000) ldh      [12]
-(001) jeq      #0x800           jt 2	jf 12
+(001) jeq      #0x800           jt 2    jf 11
 (002) ldb      [23]
-(003) jeq      #0x6             jt 4	jf 12
+(003) jeq      #0x6             jt 4    jf 11
 (004) ldh      [20]
-(005) jset     #0x1fff          jt 12	jf 6
+(005) jset     #0x1fff          jt 11   jf 6
 (006) ldxb     4*([14]&0xf)
 (007) ldh      [x + 14]
-(008) jeq      #0x50            jt 11	jf 9
+(008) jeq      #0x50            jt 19   jf 9
 (009) ldh      [x + 16]
-(010) jeq      #0x50            jt 11	jf 12
-(011) ret      #0xffffffff
-(012) ret      #0x0
+(010) jeq      #0x50            jt 19   jf 11
+(011) ldh      [12]
+(012) jeq      #0x86dd          jt 13   jf 20
+(013) ldb      [20]
+(014) jeq      #0x6             jt 15   jf 20
+(015) ldh      [54]
+(016) jeq      #0x50            jt 19   jf 17
+(017) ldh      [56]
+(018) jeq      #0x50            jt 19   jf 20
+(019) ret      #0xffffffff
+(020) ret      #0x0
 ```
 
 ## `no_std`
@@ -42,18 +50,26 @@ Use [cbpf_dump](examples/cbpf_dump.rs) util with *pcap-filter expression* (e.g. 
 ```sh
 $ cargo run --quiet --example cbpf_dump -- 'tcp port 80'
 (000) ldh      [12]
-(001) jeq      #0x800           jt 2    jf 12
+(001) jeq      #0x800           jt 2    jf 11
 (002) ldb      [23]
-(003) jeq      #0x6             jt 4    jf 12
+(003) jeq      #0x6             jt 4    jf 11
 (004) ldh      [20]
-(005) jset     #0x1fff          jt 12   jf 6
+(005) jset     #0x1fff          jt 11   jf 6
 (006) ldxb     4*([14]&0xf)
 (007) ldh      [x + 14]
-(008) jeq      #0x50            jt 11   jf 9
+(008) jeq      #0x50            jt 19   jf 9
 (009) ldh      [x + 16]
-(010) jeq      #0x50            jt 11   jf 12
-(011) ret      #0xffffffff
-(012) ret      #0x0
+(010) jeq      #0x50            jt 19   jf 11
+(011) ldh      [12]
+(012) jeq      #0x86dd          jt 13   jf 20
+(013) ldb      [20]
+(014) jeq      #0x6             jt 15   jf 20
+(015) ldh      [54]
+(016) jeq      #0x50            jt 19   jf 17
+(017) ldh      [56]
+(018) jeq      #0x50            jt 19   jf 20
+(019) ret      #0xffffffff
+(020) ret      #0x0
 ```
 
 ## Differential testing against the real kernel
