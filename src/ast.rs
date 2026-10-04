@@ -5,10 +5,11 @@
 use crate::error::Offset;
 use alloc::boxed::Box;
 
-/// A boolean expression over [`Primitive`]s.
+/// A boolean expression over [`Primitive`]s and [`EtherPrimitive`]s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Expr {
     Primitive(Primitive),
+    Ether(EtherPrimitive),
     Not(Box<Expr>, Offset),
     And(Box<Expr>, Box<Expr>, Offset),
     Or(Box<Expr>, Box<Expr>, Offset),
@@ -62,3 +63,35 @@ pub(crate) enum AddrLit {
     V4(u32),
     V6(u128),
 }
+
+/// A `ether host <mac>` / `ether [src|dst] [host] <mac>` / `ether proto <name-or-number>` /
+/// `ether broadcast`/`broadcast` / `ether multicast`/`multicast` primitive.
+///
+/// Deliberately not a [`Primitive`]: none of these ever take a `proto` qualifier (there's no
+/// encapsulating protocol to name - a MAC address means the same thing whatever's inside the
+/// frame), and there's no default-expansion over alternate protocols the way bare `host`/`port`
+/// get in `desugar.rs` - a leaf here is already fully resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EtherPrimitive {
+    pub kind: EtherKind,
+    pub offset: Offset,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EtherKind {
+    /// `ether host`/`ether src [host]`/`ether dst [host]`. `None` means "src or dst"
+    /// (bidirectional, dst checked first - matching libpcap's own generated code).
+    Host(MacAddr, Option<DirTag>),
+    /// `ether proto <name-or-number>`: true iff the frame's ethertype equals this value.
+    Proto(u16),
+    /// `ether broadcast`/bare `broadcast`: the destination MAC is the all-ones broadcast address.
+    Broadcast,
+    /// `ether multicast`/bare `multicast`: the destination MAC's multicast bit (the low bit of its
+    /// first byte) is set. Note this also matches the broadcast address, same as real libpcap's
+    /// own generated code (verified against `tcpdump -d 'multicast'`) - it does not exclude it.
+    Multicast,
+}
+
+/// A 6-byte Ethernet hardware address, in the order it appears on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MacAddr(pub [u8; 6]);

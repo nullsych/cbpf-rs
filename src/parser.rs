@@ -6,7 +6,9 @@
 //! `portrange`) is required, so a bare `tcp` does not parse - every primitive has to say
 //! what it matches on.
 
-use crate::ast::{AddrLit, DirTag, Expr, PrimType, Primitive, ProtoTag};
+use crate::ast::{
+    AddrLit, DirTag, EtherKind, EtherPrimitive, Expr, MacAddr, PrimType, Primitive, ProtoTag,
+};
 use crate::error::{CompileError, ErrorTag, Offset};
 use crate::lexer::{Token, TokenTag};
 use alloc::boxed::Box;
@@ -49,6 +51,7 @@ fn offset_from_expr(e: &Expr) -> Offset {
     match e {
         // get simple primitive offset
         Expr::Primitive(p) => p.offset.clone(),
+        Expr::Ether(e) => e.offset.clone(),
         // get other
         Expr::Not(_, s) | Expr::And(_, _, s) | Expr::Or(_, _, s) => s.clone(),
     }
@@ -209,7 +212,12 @@ impl<'a> Parser<'a> {
                 self.peek().offset.clone(),
                 ErrorTag::UnbalancedParens,
             )),
-            TokenTag::Word(_) => self.parse_primitive().map(Expr::Primitive),
+            TokenTag::Word(_) => match self.word() {
+                Some("ether") | Some("broadcast") | Some("multicast") => {
+                    self.parse_ether_primitive().map(Expr::Ether)
+                }
+                _ => self.parse_primitive().map(Expr::Primitive),
+            },
             TokenTag::Eof => Err(CompileError::new(
                 self.peek().offset.clone(),
                 ErrorTag::UnexpectedEof {
@@ -252,6 +260,85 @@ impl<'a> Parser<'a> {
         };
         self.advance();
         Some(tag)
+    }
+
+    /// Consume the current token if it is the word `word`; returns whether it did. Used for the
+    /// optional `host` after `ether src`/`ether dst`.
+    fn try_consume_word(&mut self, word: &str) -> bool {
+        if self.word() == Some(word) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Parses an `ether ...`/bare `broadcast`/`multicast` primitive - see [`EtherPrimitive`]'s doc
+    /// comment for why these don't go through [`Self::parse_primitive`]'s `[proto] [dir] type value`
+    /// shape at all. Called once `self.word()` is already known to be `"ether"`, `"broadcast"`, or
+    /// `"multicast"`.
+    fn parse_ether_primitive(&mut self) -> Result<EtherPrimitive, CompileError> {
+        let start = self.peek().offset.start;
+
+        // The two bare forms need no "ether" keyword at all.
+        match self.word() {
+            Some("broadcast") => {
+                self.advance();
+                return Ok(EtherPrimitive {
+                    kind: EtherKind::Broadcast,
+                    offset: start..self.tokens[self.pos.saturating_sub(1)].offset.end,
+                });
+            }
+            Some("multicast") => {
+                self.advance();
+                return Ok(EtherPrimitive {
+                    kind: EtherKind::Multicast,
+                    offset: start..self.tokens[self.pos.saturating_sub(1)].offset.end,
+                });
+            }
+            _ => {}
+        }
+
+        self.advance(); // consume "ether"
+        let expected = "'host', 'src', 'dst', 'proto', 'broadcast', or 'multicast'";
+        let (kw, kw_offset) = self.expect_word(expected)?;
+        let kind = match kw.as_str() {
+            "host" => {
+                let (text, offset) = self.expect_word("a MAC address")?;
+                EtherKind::Host(parse_mac_literal(&text, offset)?, None)
+            }
+            "src" => {
+                self.try_consume_word("host");
+                let (text, offset) = self.expect_word("a MAC address")?;
+                EtherKind::Host(parse_mac_literal(&text, offset)?, Some(DirTag::Src))
+            }
+            "dst" => {
+                self.try_consume_word("host");
+                let (text, offset) = self.expect_word("a MAC address")?;
+                EtherKind::Host(parse_mac_literal(&text, offset)?, Some(DirTag::Dst))
+            }
+            "proto" => {
+                let (text, offset) = self.expect_word("an ethertype name or number")?;
+                EtherKind::Proto(parse_ethertype(&text, offset)?)
+            }
+            "broadcast" => EtherKind::Broadcast,
+            "multicast" => EtherKind::Multicast,
+            _ => {
+                return Err(CompileError::new(
+                    kw_offset,
+                    ErrorTag::UnexpectedToken {
+                        expected,
+                        found: kw,
+                    },
+                ));
+            }
+        };
+
+        let end = self.tokens[self.pos.saturating_sub(1)].offset.end;
+        Ok(EtherPrimitive {
+            kind,
+            offset: start..end,
+        })
     }
 
     /// Parse one `[proto] [dir] type value` primitive, where `type` is `host`, `net`, `port`, or
@@ -428,6 +515,53 @@ fn parse_ipv6_literal(
     Ok((AddrLit::V6(u128::from(addr)), prefix))
 }
 
+/// Parses a MAC address literal: exactly 6 colon-separated 2-hex-digit octets (`aa:bb:cc:dd:ee:ff`).
+fn parse_mac_literal(text: &str, offset: Offset) -> Result<MacAddr, CompileError> {
+    let invalid = || {
+        CompileError::new(
+            offset.clone(),
+            ErrorTag::InvalidMacLiteral(String::from(text)),
+        )
+    };
+
+    let mut octets = [0u8; 6];
+    let mut count = 0;
+    for part in text.split(':') {
+        if count >= 6 || part.len() != 2 {
+            return Err(invalid());
+        }
+        octets[count] = u8::from_str_radix(part, 16).map_err(|_| invalid())?;
+        count += 1;
+    }
+    if count != 6 {
+        return Err(invalid());
+    }
+    Ok(MacAddr(octets))
+}
+
+/// Parses an `ether proto` value: one of the plain-ethertype names real libpcap also accepts there
+/// (`ip`, `ip6`/`ipv6`, `arp`, `rarp` - unlike e.g. `stp` or `ipx`, these need no legacy 802.3/LLC
+/// framing check, just an ethertype equality, so this crate implements them; anything else needs
+/// its numeric ethertype, exactly as real libpcap also requires for names it doesn't recognize
+/// either, e.g. `vlan` has no name in real tcpdump, only `0x8100`), or a decimal or `0x`-prefixed
+/// hex number.
+fn parse_ethertype(text: &str, offset: Offset) -> Result<u16, CompileError> {
+    let lower = text.to_lowercase();
+    match lower.as_str() {
+        "ip" => return Ok(0x0800),
+        "ip6" | "ipv6" => return Ok(0x86dd),
+        "arp" => return Ok(0x0806),
+        "rarp" => return Ok(0x8035),
+        _ => {}
+    }
+
+    let parsed = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+        Some(hex) => u16::from_str_radix(hex, 16),
+        None => text.parse::<u16>(),
+    };
+    parsed.map_err(|_| CompileError::new(offset, ErrorTag::InvalidEtherType(String::from(text))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,6 +603,19 @@ mod tests {
                         }
                     }
                 }
+                Expr::Ether(e) => match &e.kind {
+                    EtherKind::Host(MacAddr(m), dir) => {
+                        let dir = match dir {
+                            Some(DirTag::Src) => "src",
+                            Some(DirTag::Dst) => "dst",
+                            None => "*",
+                        };
+                        out.push_str(&alloc::format!("ether&{dir} host={m:02x?}"));
+                    }
+                    EtherKind::Proto(et) => out.push_str(&alloc::format!("ether proto={et:#x}")),
+                    EtherKind::Broadcast => out.push_str("ether broadcast"),
+                    EtherKind::Multicast => out.push_str("ether multicast"),
+                },
                 Expr::Not(inner, _) => {
                     out.push('!');
                     go(inner, out);
@@ -666,5 +813,102 @@ mod tests {
         assert!(
             matches!(err.tag, ErrorTag::UnexpectedToken { expected, .. } if expected.contains("host"))
         );
+    }
+
+    #[test]
+    fn ether_host_bidirectional() {
+        assert_eq!(
+            render("ether host aa:bb:cc:dd:ee:ff"),
+            "ether&* host=[aa, bb, cc, dd, ee, ff]"
+        );
+    }
+
+    #[test]
+    fn ether_src_dst_with_and_without_host_keyword() {
+        for src in [
+            "ether src aa:bb:cc:dd:ee:ff",
+            "ether src host aa:bb:cc:dd:ee:ff",
+        ] {
+            assert_eq!(render(src), "ether&src host=[aa, bb, cc, dd, ee, ff]");
+        }
+        for src in [
+            "ether dst aa:bb:cc:dd:ee:ff",
+            "ether dst host aa:bb:cc:dd:ee:ff",
+        ] {
+            assert_eq!(render(src), "ether&dst host=[aa, bb, cc, dd, ee, ff]");
+        }
+    }
+
+    #[test]
+    fn ether_proto_by_name_and_number() {
+        assert_eq!(render("ether proto ip"), "ether proto=0x800");
+        assert_eq!(render("ether proto ip6"), "ether proto=0x86dd");
+        assert_eq!(render("ether proto ipv6"), "ether proto=0x86dd");
+        assert_eq!(render("ether proto arp"), "ether proto=0x806");
+        assert_eq!(render("ether proto rarp"), "ether proto=0x8035");
+        assert_eq!(render("ether proto 0x8100"), "ether proto=0x8100");
+        assert_eq!(render("ether proto 34525"), "ether proto=0x86dd");
+    }
+
+    #[test]
+    fn broadcast_and_multicast_bare_and_ether_prefixed_are_identical() {
+        assert_eq!(render("broadcast"), "ether broadcast");
+        assert_eq!(render("ether broadcast"), "ether broadcast");
+        assert_eq!(render("multicast"), "ether multicast");
+        assert_eq!(render("ether multicast"), "ether multicast");
+    }
+
+    #[test]
+    fn ether_composes_with_and_or_not() {
+        assert_eq!(
+            render("ether host aa:bb:cc:dd:ee:ff and not broadcast"),
+            "(ether&* host=[aa, bb, cc, dd, ee, ff] & !ether broadcast)"
+        );
+    }
+
+    #[test]
+    fn invalid_mac_literal_is_an_error() {
+        for src in [
+            "ether host aa:bb:cc:dd:ee",       // only 5 groups
+            "ether host aa:bb:cc:dd:ee:ff:00", // 7 groups
+            "ether host aa:bb:cc:dd:ee:gg",    // not hex
+            "ether host aabbccddeeff",         // no colons at all
+        ] {
+            let tokens = lex(src).unwrap();
+            assert!(
+                matches!(
+                    parse(&tokens).unwrap_err().tag,
+                    ErrorTag::InvalidMacLiteral(_)
+                ),
+                "{src} should be an invalid MAC literal"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_ether_proto_is_an_error() {
+        for src in [
+            "ether proto vlan",
+            "ether proto 99999",
+            "ether proto notanumber",
+        ] {
+            let tokens = lex(src).unwrap();
+            assert!(
+                matches!(
+                    parse(&tokens).unwrap_err().tag,
+                    ErrorTag::InvalidEtherType(_)
+                ),
+                "{src} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn ether_requires_a_known_qualifier() {
+        let tokens = lex("ether foo").unwrap();
+        assert!(matches!(
+            parse(&tokens).unwrap_err().tag,
+            ErrorTag::UnexpectedToken { .. }
+        ));
     }
 }

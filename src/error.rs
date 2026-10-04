@@ -29,6 +29,10 @@ pub enum ErrorTag {
     InvalidIPv4Literal(String),
     /// Text that was expected to be an IPv6 address/prefix literal didn't parse as one.
     InvalidIPv6Literal(String),
+    /// Text that was expected to be a MAC address (`xx:xx:xx:xx:xx:xx`) didn't parse as one.
+    InvalidMacLiteral(String),
+    /// Text that was expected to be an `ether proto` name or ethertype number didn't parse as one.
+    InvalidEtherType(String),
     /// Text that was expected to be a port number didn't parse as one (or is out of range).
     InvalidPortNumber(String),
     /// A `portrange` primitive had `lo > hi`.
@@ -77,6 +81,20 @@ impl fmt::Display for ErrorTag {
 
             ErrorTag::InvalidIPv6Literal(text) => {
                 write!(f, "'{text}' is not a valid IPv6 address or network")
+            }
+
+            ErrorTag::InvalidMacLiteral(text) => {
+                write!(
+                    f,
+                    "'{text}' is not a valid MAC address (expected xx:xx:xx:xx:xx:xx)"
+                )
+            }
+
+            ErrorTag::InvalidEtherType(text) => {
+                write!(
+                    f,
+                    "'{text}' is not a valid ether proto name or ethertype number"
+                )
             }
 
             ErrorTag::InvalidPortNumber(text) => write!(f, "'{text}' is not a valid port number"),

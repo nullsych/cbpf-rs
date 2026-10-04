@@ -7,6 +7,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Link-layer (MAC) primitives, matching real libpcap semantics (verified against `tcpdump -d` and differentially against live `tcpdump`):
+  - `ether host <mac>` / `ether src [host] <mac>` / `ether dst [host] <mac>` - MAC address match,
+    bidirectional (destination checked first) or one direction only. `mac` is `xx:xx:xx:xx:xx:xx`.
+  - `ether proto <name-or-number>` - a standalone ethertype equality check, with no address/protocol
+    gate paired with it (unlike `arp`/`ip6`/...). Names: `ip`, `ip6`/`ipv6`, `arp`, `rarp`; anything
+    else needs its numeric ethertype (decimal or `0x`-prefixed hex) - same as real tcpdump, which has
+    no name for e.g. `vlan` either.
+  - `ether broadcast`/bare `broadcast` - destination MAC is `ff:ff:ff:ff:ff:ff`.
+  - `ether multicast`/bare `multicast` - destination MAC's multicast bit is set. This also matches
+    the broadcast address, same as real libpcap's own generated code - it is not "multicast and not
+    broadcast".
+  - None of these take a `proto` qualifier or get default-expanded over alternate protocols the way
+    `host`/`port` do (see `ast.rs`'s `EtherPrimitive`): a MAC address or ethertype means the same
+    thing regardless of what's inside the frame.
+  - Only compiles for `LinkType::Ethernet`: `LinuxSll` records no destination MAC at all, and `Raw`
+    has no link-layer header. Both are rejected with `ErrorTag::InvalidPrimitiveCombination`.
+- `ErrorTag::InvalidMacLiteral` and `ErrorTag::InvalidEtherType`, for malformed MAC addresses and
+  `ether proto` values respectively.
+
 ## [0.2.0] - 2026-09-30
 
 ### Added

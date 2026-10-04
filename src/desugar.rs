@@ -10,7 +10,7 @@
 //!
 //! `Not`/`And`/`Or` nodes pass through structurally unchanged - only `Primitive` leaves expand.
 
-use crate::ast::{AddrLit, DirTag, Expr, PrimType, Primitive, ProtoTag};
+use crate::ast::{AddrLit, DirTag, EtherPrimitive, Expr, PrimType, Primitive, ProtoTag};
 use crate::error::Offset;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -53,6 +53,9 @@ pub(crate) struct CompiledPrimitive {
 #[derive(Debug, Clone)]
 pub(crate) enum ExpandedExpr {
     Leaf(CompiledPrimitive),
+    /// An `ether`/`broadcast`/`multicast` leaf, already fully resolved - see [`EtherPrimitive`]'s
+    /// doc comment for why it needs no expansion the way a [`CompiledPrimitive`] leaf does.
+    EtherLeaf(EtherPrimitive),
     Not(Box<ExpandedExpr>),
     And(Box<ExpandedExpr>, Box<ExpandedExpr>),
     Or(Box<ExpandedExpr>, Box<ExpandedExpr>),
@@ -61,6 +64,7 @@ pub(crate) enum ExpandedExpr {
 pub(crate) fn expand(expr: &Expr) -> ExpandedExpr {
     match expr {
         Expr::Primitive(p) => expand_primitive(p),
+        Expr::Ether(e) => ExpandedExpr::EtherLeaf(e.clone()),
         Expr::Not(inner, _) => ExpandedExpr::Not(Box::new(expand(inner))),
         Expr::And(l, r, _) => ExpandedExpr::And(Box::new(expand(l)), Box::new(expand(r))),
         Expr::Or(l, r, _) => ExpandedExpr::Or(Box::new(expand(l)), Box::new(expand(r))),
@@ -151,6 +155,22 @@ mod tests {
                 };
                 alloc::format!("{proto}&{dir} {ty}")
             }
+            ExpandedExpr::EtherLeaf(e) => {
+                use crate::ast::EtherKind;
+                match &e.kind {
+                    EtherKind::Host(crate::ast::MacAddr(m), dir) => {
+                        let dir = match dir {
+                            Some(DirTag::Src) => "src",
+                            Some(DirTag::Dst) => "dst",
+                            None => "*",
+                        };
+                        alloc::format!("ether&{dir} host={m:02x?}")
+                    }
+                    EtherKind::Proto(et) => alloc::format!("ether proto={et:#x}"),
+                    EtherKind::Broadcast => String::from("ether broadcast"),
+                    EtherKind::Multicast => String::from("ether multicast"),
+                }
+            }
             ExpandedExpr::Not(inner) => alloc::format!("!{}", render(inner)),
             ExpandedExpr::And(l, r) => alloc::format!("({} & {})", render(l), render(r)),
             ExpandedExpr::Or(l, r) => alloc::format!("({} | {})", render(l), render(r)),
@@ -218,6 +238,22 @@ mod tests {
         assert_eq!(
             expand_src("tcp src port 80 and not udp dst port 53"),
             "(tcp&src port=80 & !udp&dst port=53)"
+        );
+    }
+
+    /// `ether`/`broadcast`/`multicast` leaves get no default-expansion at all - unlike a bare
+    /// `host`/`port`, there's no set of alternate protocols to OR over.
+    #[test]
+    fn ether_leaves_pass_through_unexpanded() {
+        assert_eq!(
+            expand_src("ether host aa:bb:cc:dd:ee:ff"),
+            "ether&* host=[aa, bb, cc, dd, ee, ff]"
+        );
+        assert_eq!(expand_src("broadcast"), "ether broadcast");
+        assert_eq!(expand_src("ether proto ip"), "ether proto=0x800");
+        assert_eq!(
+            expand_src("broadcast or tcp port 80"),
+            "(ether broadcast | (tcp&src port=80 | tcp&dst port=80))"
         );
     }
 }

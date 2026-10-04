@@ -355,3 +355,90 @@ fn tcp_port_80_agrees_with_tcpdump_on_ipv6_packets_too() {
         .ports(4000, 80);
     assert_agrees("tcp port 80", &wrong_proto.0, "IPv6 UDP, not TCP");
 }
+
+/// A minimal frame with just an Ethernet header (14 bytes) and an ethertype - Ether-layer primitives
+/// don't look past it, so nothing else needs to be there.
+fn eth_frame(src_mac: [u8; 6], dst_mac: [u8; 6], ethertype: u16) -> Vec<u8> {
+    let mut f = vec![0u8; 14];
+    f[0..6].copy_from_slice(&dst_mac);
+    f[6..12].copy_from_slice(&src_mac);
+    f[12..14].copy_from_slice(&ethertype.to_be_bytes());
+    f
+}
+
+#[test]
+fn ether_host_agrees_with_tcpdump() {
+    let mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+    let other = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+
+    assert_agrees(
+        "ether host aa:bb:cc:dd:ee:ff",
+        &eth_frame(mac, other, 0x0800),
+        "as src",
+    );
+    assert_agrees(
+        "ether host aa:bb:cc:dd:ee:ff",
+        &eth_frame(other, mac, 0x0800),
+        "as dst",
+    );
+    assert_agrees(
+        "ether host aa:bb:cc:dd:ee:ff",
+        &eth_frame(other, other, 0x0800),
+        "neither",
+    );
+    assert_agrees(
+        "ether src aa:bb:cc:dd:ee:ff",
+        &eth_frame(other, mac, 0x0800),
+        "src filter, mac is dst",
+    );
+    assert_agrees(
+        "ether dst aa:bb:cc:dd:ee:ff",
+        &eth_frame(other, mac, 0x0800),
+        "dst filter, mac is dst",
+    );
+}
+
+#[test]
+fn broadcast_and_multicast_agree_with_tcpdump() {
+    let broadcast_frame = eth_frame([0, 0, 0, 0, 0, 0], [0xff; 6], 0x0800);
+    let multicast_frame = eth_frame([0, 0, 0, 0, 0, 0], [0x01, 0, 0, 0, 0, 0], 0x0800);
+    let unicast_frame = eth_frame([0, 0, 0, 0, 0, 0], [0x02, 0, 0, 0, 0, 0], 0x0800);
+
+    assert_agrees("broadcast", &broadcast_frame, "broadcast dst");
+    assert_agrees(
+        "broadcast",
+        &multicast_frame,
+        "multicast dst, not broadcast",
+    );
+    assert_agrees("broadcast", &unicast_frame, "unicast dst");
+
+    assert_agrees(
+        "multicast",
+        &broadcast_frame,
+        "broadcast dst (multicast bit is also set)",
+    );
+    assert_agrees("multicast", &multicast_frame, "multicast dst");
+    assert_agrees("multicast", &unicast_frame, "unicast dst");
+}
+
+#[test]
+fn ether_proto_agrees_with_tcpdump() {
+    for (name, ethertype) in [
+        ("ip", 0x0800u16),
+        ("ip6", 0x86dd),
+        ("arp", 0x0806),
+        ("rarp", 0x8035),
+    ] {
+        let filter = format!("ether proto {name}");
+        assert_agrees(
+            &filter,
+            &eth_frame([0; 6], [0; 6], ethertype),
+            &format!("{name}, matching ethertype"),
+        );
+        assert_agrees(
+            &filter,
+            &eth_frame([0; 6], [0; 6], 0x9999),
+            &format!("{name}, unrelated ethertype"),
+        );
+    }
+}

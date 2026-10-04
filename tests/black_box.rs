@@ -443,3 +443,136 @@ fn arp_is_still_rejected_on_raw() {
     let err = compile("arp host 10.0.0.1", LinkType::Raw, KEEP_WHOLE_PACKET).unwrap_err();
     assert!(matches!(err.tag, ErrorTag::InvalidPrimitiveCombination(_)));
 }
+
+/// `ether host` matches by MAC, regardless of what's inside the frame - a bidirectional match tries
+/// dst first, then src.
+#[test]
+fn ether_host_matches_src_or_dst() {
+    let program = compile(
+        "ether host aa:bb:cc:dd:ee:ff",
+        LinkType::Ethernet,
+        KEEP_WHOLE_PACKET,
+    )
+    .unwrap();
+
+    let mut packet = vec![0u8; 14];
+    packet[0..6].copy_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]); // as dst
+    assert!(program.matches(&packet), "as dst should match");
+
+    packet[0..6].fill(0);
+    packet[6..12].copy_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]); // as src
+    assert!(program.matches(&packet), "as src should match");
+
+    packet[6] = 0xff; // one byte off
+    assert!(!program.matches(&packet));
+}
+
+#[test]
+fn ether_src_and_dst_check_one_direction_only() {
+    let mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+    let src_only = compile(
+        "ether src aa:bb:cc:dd:ee:ff",
+        LinkType::Ethernet,
+        KEEP_WHOLE_PACKET,
+    )
+    .unwrap();
+    let dst_only = compile(
+        "ether dst aa:bb:cc:dd:ee:ff",
+        LinkType::Ethernet,
+        KEEP_WHOLE_PACKET,
+    )
+    .unwrap();
+
+    let mut packet = vec![0u8; 14];
+    packet[6..12].copy_from_slice(&mac); // src == mac, dst == 0
+
+    assert!(src_only.matches(&packet));
+    assert!(!dst_only.matches(&packet));
+}
+
+#[test]
+fn broadcast_matches_only_the_all_ones_destination() {
+    let program = compile("broadcast", LinkType::Ethernet, KEEP_WHOLE_PACKET).unwrap();
+
+    let mut packet = vec![0u8; 14];
+    packet[0..6].fill(0xff);
+    assert!(program.matches(&packet));
+
+    packet[5] = 0xfe;
+    assert!(!program.matches(&packet));
+}
+
+/// This crate's `multicast` matches the broadcast address too, same as real libpcap's own compiled
+/// `multicast` (`tcpdump -d` gives a single `ldb[0]; jset 0x1` with no exclusion) - it is not the
+/// stricter "multicast and not broadcast" some other tools define.
+#[test]
+fn multicast_matches_the_bit_including_broadcast() {
+    let program = compile("multicast", LinkType::Ethernet, KEEP_WHOLE_PACKET).unwrap();
+
+    let mut packet = vec![0u8; 14];
+    packet[0] = 0x01; // multicast bit set, not broadcast
+    assert!(program.matches(&packet));
+
+    packet[0..6].fill(0xff); // broadcast - also has the bit set
+    assert!(
+        program.matches(&packet),
+        "multicast also matches broadcast, like real libpcap"
+    );
+
+    packet[0] = 0x02; // bit clear
+    assert!(!program.matches(&packet));
+}
+
+#[test]
+fn ether_proto_matches_by_ethertype_alone() {
+    let program = compile("ether proto ip6", LinkType::Ethernet, KEEP_WHOLE_PACKET).unwrap();
+
+    let mut packet = vec![0u8; 14];
+    packet[12..14].copy_from_slice(&0x86ddu16.to_be_bytes());
+    assert!(program.matches(&packet));
+
+    packet[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+    assert!(!program.matches(&packet));
+}
+
+#[test]
+fn ether_primitives_compose_with_and_or_not() {
+    let program = compile(
+        "ether proto ip and not broadcast",
+        LinkType::Ethernet,
+        KEEP_WHOLE_PACKET,
+    )
+    .unwrap();
+
+    let mut packet = vec![0u8; 34];
+    packet[12..14].copy_from_slice(&0x0800u16.to_be_bytes());
+    assert!(program.matches(&packet), "IPv4, not broadcast");
+
+    packet[0..6].fill(0xff);
+    assert!(!program.matches(&packet), "IPv4 but broadcast");
+}
+
+#[test]
+fn invalid_mac_literal_reports_an_offset() {
+    let src = "ether host aa:bb:cc:dd:ee";
+    let err = compile(src, LinkType::Ethernet, KEEP_WHOLE_PACKET).unwrap_err();
+    assert!(matches!(err.tag, ErrorTag::InvalidMacLiteral(_)));
+    assert_eq!(&src[err.offset.clone()], "aa:bb:cc:dd:ee");
+}
+
+#[test]
+fn invalid_ether_proto_reports_an_offset() {
+    let src = "ether proto notaproto";
+    let err = compile(src, LinkType::Ethernet, KEEP_WHOLE_PACKET).unwrap_err();
+    assert!(matches!(err.tag, ErrorTag::InvalidEtherType(_)));
+    assert_eq!(&src[err.offset.clone()], "notaproto");
+}
+
+/// Neither `LinuxSll` nor `Raw` records a real source/destination MAC pair.
+#[test]
+fn ether_primitives_are_rejected_on_linux_sll_and_raw() {
+    for lt in [LinkType::LinuxSll, LinkType::Raw] {
+        let err = compile("broadcast", lt, KEEP_WHOLE_PACKET).unwrap_err();
+        assert!(matches!(err.tag, ErrorTag::InvalidPrimitiveCombination(_)));
+    }
+}

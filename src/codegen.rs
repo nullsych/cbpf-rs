@@ -2,7 +2,7 @@
 //!
 //!
 
-use crate::ast::{AddrLit, DirTag, PrimType};
+use crate::ast::{AddrLit, DirTag, EtherKind, EtherPrimitive, MacAddr, PrimType};
 use crate::desugar::{CompiledPrimitive, CompiledProto, ExpandedExpr};
 use crate::error::{CompileError, ErrorTag, Offset};
 use crate::irep::{IrBuilder, IrOp2, IrProgram, Label};
@@ -41,6 +41,12 @@ const IP6_HEADER_LEN: u32 = 40;
 const ARP_SENDER_PA_OFFSET: u32 = 14;
 const ARP_TARGET_PA_OFFSET: u32 = 24;
 
+// Ethernet header MAC offsets, absolute from frame start (not relative to `ip_base`: these are the
+// two fields `ip_base` itself is counted past).
+const ETH_DST_MAC_OFFSET: u32 = 0;
+const ETH_SRC_MAC_OFFSET: u32 = 6;
+const ETH_MAC_BROADCAST: [u8; 6] = [0xff; 6];
+
 // TCP/UDP header offsets, added to `ip_base` (see `emit_port_terminal` for why this - not an offset
 // from the TCP header's own start - is correct).
 const PORT_SRC_REL: u32 = 0;
@@ -53,6 +59,9 @@ struct Ctx<'a> {
     ip_base: u32,
     /// Offset of the ethertype field, or `None` for link types without one (Raw), where the packet is assumed to be IPv4.
     eth_field: Option<u32>,
+    /// The link type `generate()` was called with - only consulted by `ether`/`broadcast`/`multicast`
+    /// primitives, which need a genuine source/destination MAC pair (see [`compile_ether`]).
+    link_type: LinkType,
 }
 
 /// Control branch for labels.
@@ -92,6 +101,7 @@ pub(crate) fn generate(
         b: &mut builder,
         ip_base: info.ip_base,
         eth_field: info.ethertype_offset,
+        link_type,
     };
 
     // ? in case of IPv6
@@ -139,6 +149,7 @@ pub(crate) fn generate(
 fn compile_expr(e: &ExpandedExpr, ctx: &mut Ctx, branch: Branch) -> Result<(), CompileError> {
     match e {
         ExpandedExpr::Leaf(p) => compile_primitive(p, ctx, branch),
+        ExpandedExpr::EtherLeaf(e) => compile_ether(e, ctx, branch),
         ExpandedExpr::Not(inner) => compile_expr(inner, ctx, branch.swapped()),
         ExpandedExpr::And(l, r) => {
             let mid = ctx.b.new_label();
@@ -858,6 +869,149 @@ fn emit_port6_terminal(
     emit_port_compare(ctx, lo, hi, offset, branch);
 }
 
+/// Compiles an `ether host`/`ether src|dst [host]`/`ether proto`/`ether broadcast`/`ether multicast`
+/// (or bare `broadcast`/`multicast`) primitive.
+///
+/// # Errors
+///
+/// These all read the frame's own source/destination MAC pair, which only [`LinkType::Ethernet`]
+/// has: `LinuxSll`'s "address" field records the sender only, with no destination at all, and
+/// `Raw` has no link-layer header whatsoever. Both are rejected with
+/// [`ErrorTag::InvalidPrimitiveCombination`].
+fn compile_ether(e: &EtherPrimitive, ctx: &mut Ctx, branch: Branch) -> Result<(), CompileError> {
+    if ctx.link_type != LinkType::Ethernet {
+        return Err(CompileError::new(
+            e.offset.clone(),
+            ErrorTag::InvalidPrimitiveCombination(
+                "'ether'/'broadcast'/'multicast' need a real source/destination MAC pair; this link type doesn't have one",
+            ),
+        ));
+    }
+    match e.kind {
+        EtherKind::Host(mac, dir) => compile_ether_host(mac, dir, ctx, e.offset.clone(), branch),
+        EtherKind::Proto(ethertype) => {
+            compile_ether_proto(ethertype, ctx, e.offset.clone(), branch)
+        }
+        EtherKind::Broadcast => {
+            emit_mac_eq(
+                ctx,
+                ETH_DST_MAC_OFFSET,
+                ETH_MAC_BROADCAST,
+                e.offset.clone(),
+                branch,
+            );
+            Ok(())
+        }
+        EtherKind::Multicast => compile_ether_multicast(ctx, e.offset.clone(), branch),
+    }
+}
+
+/// `ether host` (bidirectional, dst checked first) or `ether src`/`ether dst` (one direction only).
+fn compile_ether_host(
+    mac: MacAddr,
+    dir: Option<DirTag>,
+    ctx: &mut Ctx,
+    offset: Offset,
+    branch: Branch,
+) -> Result<(), CompileError> {
+    match dir {
+        Some(DirTag::Src) => emit_mac_eq(ctx, ETH_SRC_MAC_OFFSET, mac.0, offset, branch),
+        Some(DirTag::Dst) => emit_mac_eq(ctx, ETH_DST_MAC_OFFSET, mac.0, offset, branch),
+        None => {
+            let mid = ctx.b.new_label();
+            emit_mac_eq(
+                ctx,
+                ETH_DST_MAC_OFFSET,
+                mac.0,
+                offset.clone(),
+                Branch {
+                    on_true: branch.on_true,
+                    on_false: mid,
+                },
+            );
+            ctx.b.place(mid);
+            emit_mac_eq(ctx, ETH_SRC_MAC_OFFSET, mac.0, offset, branch);
+        }
+    }
+    Ok(())
+}
+
+/// `ether proto <name-or-number>`: a plain ethertype equality, same shape as the ethertype half of
+/// [`emit_ethertype_and_proto_gates`] but standalone - there's no protocol/address check to follow it
+/// with, unlike `arp`/`ip6`/... which always pair the ethertype gate with something else.
+fn compile_ether_proto(
+    ethertype: u16,
+    ctx: &mut Ctx,
+    offset: Offset,
+    branch: Branch,
+) -> Result<(), CompileError> {
+    // `compile_ether` already confirmed `ctx.link_type == Ethernet`, which always has an ethertype field.
+    let eth_field = ctx
+        .eth_field
+        .expect("Ethernet always has an ethertype field");
+    ctx.b.emit(IrOp2::LdhAbs(eth_field), offset.clone());
+    ctx.b.emit(
+        IrOp2::Jeq {
+            imm: u32::from(ethertype),
+            jt: branch.on_true,
+            jf: branch.on_false,
+        },
+        offset,
+    );
+    Ok(())
+}
+
+/// `ether multicast`/bare `multicast`: the destination MAC's multicast bit (byte 0's low bit) is
+/// set. This also matches the broadcast address (`ff:ff:ff:ff:ff:ff` has that bit set too) - real
+/// libpcap's own generated code does the same (confirmed against `tcpdump -d 'multicast'`, which
+/// compiles to exactly this one check, with no separate exclusion for broadcast).
+fn compile_ether_multicast(
+    ctx: &mut Ctx,
+    offset: Offset,
+    branch: Branch,
+) -> Result<(), CompileError> {
+    ctx.b
+        .emit(IrOp2::LdbAbs(ETH_DST_MAC_OFFSET), offset.clone());
+    ctx.b.emit(
+        IrOp2::Jset {
+            imm: 0x01,
+            jt: branch.on_true,
+            jf: branch.on_false,
+        },
+        offset,
+    );
+    Ok(())
+}
+
+/// Emits a 6-byte MAC comparison at `field_offset`, split as a 4-byte word (`ld`) followed by a
+/// 2-byte halfword (`ldh`) - cBPF has no wider load, so 48 bits needs two instructions. A match on
+/// the first falls through to check the second; either one failing jumps to `on_false`.
+fn emit_mac_eq(ctx: &mut Ctx, field_offset: u32, mac: [u8; 6], offset: Offset, branch: Branch) {
+    let hi = u32::from_be_bytes([mac[0], mac[1], mac[2], mac[3]]);
+    let lo = u32::from(u16::from_be_bytes([mac[4], mac[5]]));
+
+    let mid = ctx.b.new_label();
+    ctx.b.emit(IrOp2::LdwAbs(field_offset), offset.clone());
+    ctx.b.emit(
+        IrOp2::Jeq {
+            imm: hi,
+            jt: mid,
+            jf: branch.on_false,
+        },
+        offset.clone(),
+    );
+    ctx.b.place(mid);
+    ctx.b.emit(IrOp2::LdhAbs(field_offset + 4), offset.clone());
+    ctx.b.emit(
+        IrOp2::Jeq {
+            imm: lo,
+            jt: branch.on_true,
+            jf: branch.on_false,
+        },
+        offset,
+    );
+}
+
 /// `arp`/`rarp` are identified by their ethertype alone, with no equivalent in the IP header itself (unlike IPv4 vs IPv6,
 /// which [`emit_l3_gate`] can tell apart from the version nibble even without an ethertype field), so they can't be
 /// expressed on a link type that has none.
@@ -1315,5 +1469,109 @@ mod tests {
             generate(&exp, LinkType::Raw, SNAPLEN).unwrap_err().tag,
             ErrorTag::InvalidPrimitiveCombination(_)
         ));
+    }
+
+    /// `ether host` checks dst first, then src: two 4+2-byte comparisons per direction, no
+    /// ethertype gate at all (a MAC address means the same thing whatever's inside the frame).
+    #[test]
+    fn ether_host_bidirectional() {
+        let expected = "\
+(000) ld       [0]
+(001) jeq      #0xaabbccdd  jt 2 jf 4
+(002) ldh      [4]
+(003) jeq      #0xeeff  jt 8 jf 4
+(004) ld       [6]
+(005) jeq      #0xaabbccdd  jt 6 jf 9
+(006) ldh      [10]
+(007) jeq      #0xeeff  jt 8 jf 9
+(008) ret      #4294967295
+(009) ret      #0
+";
+        assert_eq!(render(&get_gen("ether host aa:bb:cc:dd:ee:ff")), expected);
+    }
+
+    /// `ether src`/`ether dst` check only the one direction, so the whole prologue collapses to a
+    /// single 4+2 comparison.
+    #[test]
+    fn ether_src_checks_one_direction_only() {
+        let expected = "\
+(000) ld       [6]
+(001) jeq      #0xaabbccdd  jt 2 jf 5
+(002) ldh      [10]
+(003) jeq      #0xeeff  jt 4 jf 5
+(004) ret      #4294967295
+(005) ret      #0
+";
+        assert_eq!(render(&get_gen("ether src aa:bb:cc:dd:ee:ff")), expected);
+        // "ether src host <mac>" is exactly the same primitive, "host" is optional.
+        assert_eq!(
+            render(&get_gen("ether src host aa:bb:cc:dd:ee:ff")),
+            expected
+        );
+    }
+
+    /// `broadcast`/`ether broadcast`: only the destination MAC is checked, against all-ones.
+    #[test]
+    fn broadcast_checks_the_destination_mac() {
+        let expected = "\
+(000) ld       [0]
+(001) jeq      #0xffffffff  jt 2 jf 5
+(002) ldh      [4]
+(003) jeq      #0xffff  jt 4 jf 5
+(004) ret      #4294967295
+(005) ret      #0
+";
+        assert_eq!(render(&get_gen("broadcast")), expected);
+        assert_eq!(render(&get_gen("ether broadcast")), expected);
+    }
+
+    /// `multicast`/`ether multicast`: one instruction, the destination MAC's low bit - this also
+    /// matches the broadcast address, same as real libpcap (see `EtherKind::Multicast`'s doc comment).
+    #[test]
+    fn multicast_checks_one_bit() {
+        let expected = "\
+(000) ldb      [0]
+(001) jset     #0x1  jt 2 jf 3
+(002) ret      #4294967295
+(003) ret      #0
+";
+        assert_eq!(render(&get_gen("multicast")), expected);
+        assert_eq!(render(&get_gen("ether multicast")), expected);
+    }
+
+    /// `ether proto`: a single ethertype equality, matching `tcpdump -d 'ether proto \ip6'` exactly
+    /// (offset 12, no other gate).
+    #[test]
+    fn ether_proto_is_a_single_ethertype_check() {
+        let expected = "\
+(000) ldh      [12]
+(001) jeq      #0x86dd  jt 2 jf 3
+(002) ret      #4294967295
+(003) ret      #0
+";
+        assert_eq!(render(&get_gen("ether proto ip6")), expected);
+    }
+
+    /// Neither `LinuxSll` (no destination MAC recorded) nor `Raw` (no link-layer header at all) can
+    /// express any `ether`/`broadcast`/`multicast` primitive.
+    #[test]
+    fn ether_primitives_need_real_ethernet_framing() {
+        for src in [
+            "ether host aa:bb:cc:dd:ee:ff",
+            "broadcast",
+            "multicast",
+            "ether proto ip",
+        ] {
+            let exp = get_expanded(src);
+            for lt in [LinkType::LinuxSll, LinkType::Raw] {
+                assert!(
+                    matches!(
+                        generate(&exp, lt, SNAPLEN).unwrap_err().tag,
+                        ErrorTag::InvalidPrimitiveCombination(_)
+                    ),
+                    "{src} on {lt:?}"
+                );
+            }
+        }
     }
 }
